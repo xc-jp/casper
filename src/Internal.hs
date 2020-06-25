@@ -5,6 +5,7 @@ module Internal where
 
 import Control.Monad.Reader
 import qualified Data.ByteString as BS
+import Data.Foldable (fold)
 import Data.Serialize
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -18,11 +19,19 @@ instance Eq SHA256
 
 instance Ord SHA256
 
-class Serialize a => Content a where
-  references :: forall hash. (forall b. Address b -> hash) -> a -> [hash]
+instance Serialize SHA256 where
+  get = undefined
+  put = undefined
 
-closure :: Monad m => Address a -> CasperT m (Set SHA256)
-closure addr = go mempty [forget addr]
+class Serialize a => Content a where
+  references ::
+    forall ref. (forall b. Address b -> ref) -> a -> [ref]
+
+newtype ContentMeta = ContentMeta {deps :: (Set SHA256)}
+  deriving (Serialize)
+
+closure :: Monad m => SHA256 -> CasperT m (Set SHA256)
+closure sha = go mempty [sha]
   where
     go checked [] = pure checked
     go checked (h : t)
@@ -39,11 +48,37 @@ newtype Address a = Address {forget :: SHA256}
 hash :: Content a => a -> SHA256
 hash = undefined
 
-reserveds :: CasperT m [SHA256]
-reserveds = undefined
+allContent :: CasperT m (Set SHA256)
+allContent = undefined
 
-toPath :: Store -> SHA256 -> FilePath
-toPath = undefined
+deleteContent :: SHA256 -> CasperT m ()
+deleteContent = undefined
+
+-- future optimization: traverse shared deps only once
+collectGarbage :: Monad m => CasperT m ()
+collectGarbage = do
+  -- roots <- reserveds
+  -- everything <- allContent
+  -- notGarbage <- forM (S.toList roots) closure
+  -- forM_ (S.toList $ everything S.\\ fold notGarbage) deleteContent
+  undefined
+
+newtype StoreMeta = StoreMeta {roots :: Set SHA256}
+  deriving (Serialize)
+
+data MetaError = MetaCorrupted | MetaMissing
+
+getMetaFile :: CasperT m (Either MetaError StoreMeta)
+getMetaFile = undefined
+
+reserveds :: Monad m => CasperT m (Either MetaError (Set SHA256))
+reserveds = (fmap . fmap) roots getMetaFile
+
+shaPath :: SHA256 -> Store -> FilePath
+shaPath = undefined
+
+metaPath :: Store -> FilePath
+metaPath = undefined
 
 write :: Store -> SHA256 -> BS.ByteString -> IO ()
 write = undefined
@@ -51,4 +86,4 @@ write = undefined
     makeDirectory :: FilePath -> IO ()
     makeDirectory = undefined
 
-data Store
+newtype Store = Store {storeRoot :: FilePath}

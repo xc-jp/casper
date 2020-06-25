@@ -27,17 +27,18 @@ unreserve = undefined
 isReserved :: Address a -> CasperT m Bool
 isReserved = undefined
 
-delete :: Address a -> CasperT m ()
-delete = undefined
-
-data IndexStructure
-
--- (/>) :: Address a -> (a -> Address b) -> Address a -> CasperT m b
-
 data StoreError
 
 findStore :: FilePath -> IO (Either StoreError Store)
-findStore = undefined
+findStore =
+  -- First check if appropriate meta-file* is present
+  --   * contains list(?) of roots
+  undefined
+
+data InitError = PathExists | CannotCreate
+
+initStore :: FilePath -> IO (Either InitError Store)
+initStore = undefined
 
 runCasperT :: MonadIO m => Store -> CasperT m a -> m a
 runCasperT = undefined

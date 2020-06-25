@@ -24,3 +24,15 @@ library
     , mtl
     , cereal
     , containers
+
+test-suite casper-spec
+  hs-source-dirs: test
+  default-language: Haskell2010
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  build-depends:
+      base >= 4.7 && < 5
+    , casper
+    , tasty
+    , tasty-quickcheck
+    , temporary
