@@ -22,6 +22,8 @@ library
       base >= 4.7 && < 5
     , bytestring
     , mtl
+    , directory
+    , filepath
     , cereal
     , containers
 
