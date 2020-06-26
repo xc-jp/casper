@@ -4,6 +4,7 @@ module Casper
     CasperError,
     Address,
     Content (..),
+    Store,
     store,
     retrieve,
     runCasperT,
@@ -17,5 +18,5 @@ module Casper
 where
 
 import Control.Monad.Except (catchError)
-import qualified Data.Serialize as Re
+import Data.Serialize as Re
 import Internal
