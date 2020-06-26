@@ -10,6 +10,7 @@ let
   pkgs = import pkgsSrc pkgsArgs;
 in pkgs.haskell-nix.project {
   src = pkgs.haskell-nix.haskellLib.cleanGit {
+    name = "casper-source";
     src = ./.;
   };
   compiler-nix-name = "ghc883";

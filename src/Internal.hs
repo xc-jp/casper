@@ -3,16 +3,21 @@
 
 module Internal where
 
+import Control.Exception (Exception, handle, throwIO)
 import Control.Monad.Except
 import Control.Monad.Reader
+import qualified Crypto.Hash.SHA256 as SHA256
 import Data.Bifunctor
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base16 as Base16
+import qualified Data.ByteString.Char8 as Char8
 import Data.Foldable (fold)
 import Data.Serialize
 import Data.Set (Set)
 import qualified Data.Set as S
 import System.Directory
 import System.FilePath
+import System.IO.Error (isAlreadyExistsError)
 
 data CasperError
   = FileCorrupt FilePath String
@@ -21,19 +26,23 @@ data CasperError
   | MetaMissing FilePath
   | StoreMetaCorrupt FilePath String
   | StoreMetaMissing FilePath
+  deriving (Show, Eq)
+
+-- TODO(considerate): Don't depend on Exception. Currently required for initStore
+instance Exception CasperError
 
 newtype CasperT m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT Store m) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError)
 
-data SHA256
+instance MonadTrans CasperT where
+  lift = CasperT . lift . lift
 
-instance Eq SHA256
-
-instance Ord SHA256
+newtype SHA256 = SHA256 {unSHA256 :: BS.ByteString}
+  deriving (Eq, Ord)
 
 instance Serialize SHA256 where
-  get = undefined
-  put = undefined
+  get = SHA256 <$> get
+  put = put . unSHA256
 
 class Serialize a => Content a where
   references ::
@@ -63,12 +72,13 @@ mkMeta :: Content a => a -> ContentMeta
 mkMeta a = ContentMeta (S.fromList $ references' a)
 
 hashBS :: BS.ByteString -> SHA256
-hashBS = undefined
+hashBS = SHA256 . SHA256.hash
 
-delete :: Monad m => SHA256 -> CasperT m ()
+delete :: MonadIO m => SHA256 -> CasperT m ()
 delete sha = do
   path <- CasperT $ asks $ shaPath sha
-  undefined
+  liftIO $ removeFile path
+  liftIO $ removeFile (path <.> "meta")
 
 -- future optimization: traverse shared deps only once
 collectGarbage :: MonadIO m => CasperT m ()
@@ -78,26 +88,56 @@ collectGarbage = do
   notGarbage <- closure (S.toList rs)
   forM_ (S.toList $ everything S.\\ notGarbage) delete
   where
-    getEverything :: CasperT m (Set SHA256)
-    getEverything = undefined
+    getEverything :: MonadIO m => CasperT m (Set SHA256)
+    getEverything = CasperT $ do
+      root <- asks storeRoot
+      paths <- liftIO $ listDirectory root
+      -- need to special case meta files since they don't map to SHA256s directly
+      let plain = filter (not . hasExtension) paths
+      either throwError (pure . S.fromList) (traverse (decodeSha root) plain)
+      where
+        decodeSha :: FilePath -> String -> Either CasperError SHA256
+        decodeSha root name = case Base16.decode (Char8.pack name) of
+          (sha, rest) | BS.length sha == 32 && BS.null rest -> Right (SHA256 sha)
+          _ -> Left (FileCorrupt (root </> name) "File name does not map to a valid sha256 hash")
 
 newtype StoreMeta = StoreMeta {storeRoots :: Set SHA256}
   deriving (Serialize)
 
-decodeFile ::
-  (Serialize a, MonadIO m) =>
+decodeFileWith ::
+  (Serialize a, Monad m) =>
+  -- | File reader
+  (FilePath -> m BS.ByteString) ->
+  -- | Does path exist?
+  (FilePath -> m Bool) ->
+  -- | Path to file
   (Store -> FilePath) ->
+  -- | Missing path error
   (FilePath -> CasperError) ->
+  -- | Corrupt file error
   (FilePath -> String -> CasperError) ->
+  -- | Decoded value
   CasperT m a
-decodeFile getPath eMissing eCorrupt = do
+decodeFileWith reader checkExist getPath eMissing eCorrupt = do
   path <- CasperT $ asks getPath
-  exists <- liftIO $ doesFileExist path
+  exists <- lift $ checkExist path
   unless exists $ throwError (eMissing path)
-  bs <- liftIO $ BS.readFile path
+  bs <- lift $ reader path
   case decode bs of
     Right a -> pure a
     Left err -> throwError (eCorrupt path err)
+
+decodeFile ::
+  (Serialize a, MonadIO m) =>
+  -- | Path to file
+  (Store -> FilePath) ->
+  -- | Missing path error
+  (FilePath -> CasperError) ->
+  -- | Corrupt path error
+  (FilePath -> String -> CasperError) ->
+  -- | Decoded value
+  CasperT m a
+decodeFile = decodeFileWith (liftIO . BS.readFile) (liftIO . doesFileExist)
 
 getStoreMeta :: MonadIO m => CasperT m StoreMeta
 getStoreMeta = decodeFile storeMetaPath StoreMetaMissing StoreMetaCorrupt
@@ -117,23 +157,33 @@ roots :: MonadIO m => CasperT m (Set SHA256)
 roots = storeRoots <$> getStoreMeta
 
 shaPath :: SHA256 -> Store -> FilePath
-shaPath = undefined
+shaPath (SHA256 sha) (Store root) = root </> Char8.unpack (Base16.encode sha)
 
 storeMetaPath :: Store -> FilePath
-storeMetaPath (Store root) = root </> "meta"
+storeMetaPath (Store root) = root </> "root.meta"
 
--- TODO: Write and hash lazily
-store :: (Content a, MonadIO m) => a -> CasperT m (Address a)
-store a = do
+storeWith ::
+  (Content a, Monad m) =>
+  -- | File writer function
+  (FilePath -> BS.ByteString -> m ()) ->
+  -- | Value to store
+  a ->
+  -- | Address to stored value
+  CasperT m (Address a)
+storeWith writeFile a = do
   let bs = encode a
       sha = hashBS bs
       meta = mkMeta a
   path <- CasperT $ asks $ shaPath sha
-  liftIO $ do
-    createDirectoryIfMissing True (dropFileName path)
-    BS.writeFile path bs
-    BS.writeFile (path <.> "meta") (encode meta)
+  lift $ do
+    writeFile path bs
+    writeFile (path <.> "meta") (encode meta)
   pure $ Address sha
+
+--
+-- TODO: Write and hash lazily
+store :: (Content a, MonadIO m) => a -> CasperT m (Address a)
+store = storeWith ((liftIO .) . BS.writeFile)
 
 newtype Store = Store {storeRoot :: FilePath}
 
@@ -161,9 +211,20 @@ findStore =
   undefined
 
 data InitError = PathExists | CannotCreate
+  deriving (Show, Eq)
 
 initStore :: FilePath -> IO (Either InitError Store)
-initStore = undefined
+initStore path = handle (pure . Left . handler) $ do
+  createDirectory path -- create store path
+  result <- runCasperT store $ writeStoreMeta $ StoreMeta mempty -- create store meta file
+  either throwIO (const (pure $ Right store)) result
+  pure (Right store)
+  where
+    store = Store path
+    handler :: IOError -> InitError
+    handler err
+      | isAlreadyExistsError err = PathExists
+      | otherwise = CannotCreate
 
-runCasperT :: MonadIO m => Store -> CasperT m a -> m a
-runCasperT = undefined
+runCasperT :: MonadIO m => Store -> CasperT m a -> m (Either CasperError a)
+runCasperT store (CasperT action) = runReaderT (runExceptT action) store
