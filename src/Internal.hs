@@ -4,15 +4,13 @@
 
 module Internal where
 
-import Control.Exception (Exception, handle, throwIO)
+import Content
 import Control.Monad.Except
 import Control.Monad.Reader
 import qualified Crypto.Hash.SHA256 as SHA256
-import Data.Bifunctor
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Char8 as Char8
-import Data.Foldable (fold)
 import Data.Serialize
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -29,18 +27,17 @@ data CasperError
   | StoreMetaMissing FilePath
   deriving (Show, Eq)
 
+roundTrip :: [Int] -> CasperT IO [Int]
+roundTrip is = do
+  refs <- traverse store is
+  ref <- store refs
+  retrieve ref >>= traverse retrieve
+
 newtype CasperT m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT Store m) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError)
 
 instance MonadTrans CasperT where
   lift = CasperT . lift . lift
-
-newtype SHA256 = SHA256 {unSHA256 :: BS.ByteString}
-  deriving (Eq, Ord, Serialize)
-
-class Serialize a => Content a where
-  references ::
-    forall ref. (forall b. Address b -> ref) -> a -> [ref]
 
 references' :: Content a => a -> [SHA256]
 references' = references forget
@@ -58,9 +55,6 @@ closure = go mempty
         transitive <- dependencies h
         go (S.insert h checked) (transitive <> t)
     dependencies sha = S.toList . deps <$> getMeta sha
-
-newtype Address a = Address {forget :: SHA256}
-  deriving (Eq, Ord, Serialize)
 
 mkMeta :: Content a => a -> ContentMeta
 mkMeta a = ContentMeta (S.fromList $ references' a)
