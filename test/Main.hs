@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+
 import Casper
 import Control.Exception
 import Internal (CasperError (..), Store (..), hashBS, shaPath)
