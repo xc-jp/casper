@@ -1,8 +1,9 @@
 name:                casper
 version:             0.1.0.0
--- synopsis:
+synopsis:
+  Simple content-addressable store
 -- description:
--- homepage:            https://github.com/jonascarpay/cast#readme
+homepage:            https://github.com/xc-jp/casper#readme
 license:             BSD3
 license-file:        LICENSE
 author:              Jonas Carpay
