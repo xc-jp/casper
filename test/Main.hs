@@ -1,10 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell #-}
 
-
 import Casper
 import Control.Exception
-import Internal (CasperError (..), Store (..), hashBS, shaPath)
+import Internal (CasperError (..), Store (..), blobPath, hashBS)
 import System.Directory
 import System.FilePath
 import System.IO.Temp
@@ -17,7 +16,7 @@ import Test.Tasty.QuickCheck
 spec :: Spec
 spec = describe "SHA256" $ do
   it "should give path to content" $
-    shaPath (hashBS "bar") (Store "foo") `shouldBe` "foo/fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9"
+    blobPath (hashBS "bar") (Store "foo") `shouldBe` "foo/blob/fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9"
 
 prop_reverse :: [Int] -> Bool
 prop_reverse xs = reverse (reverse xs) == xs
@@ -26,12 +25,10 @@ instance Content Int where
   references _ _ = []
 
 inTemporaryStore :: (Casper.Store -> IO b) -> IO b
-inTemporaryStore f = withSystemTempDirectory "temp" $ \tmp -> do
-  root <- either (error . show) id <$> initStore (tmp </> "store")
-  f root
+inTemporaryStore f = withSystemTempDirectory "temp" $ \tmp -> initStore (tmp </> "store") >>= f
 
 -- | Storing and then retrieving the stored item should always return the stored contents
--- store a >>= retrieve = a
+-- >>> store a >>= retrieve = a
 prop_store_retreive :: Int -> Property
 prop_store_retreive a = monadicIO $ run $ inTemporaryStore $ \root -> do
   result <- runCasperT root $ store a >>= retrieve
@@ -53,7 +50,7 @@ prop_retrive_after_colllect_garbage a = monadicIO $ run $ inTemporaryStore $ \ro
     addr <- store a
     collectGarbage
     retrieve addr
-  pure $ result === Left (FileMissing (shaPath sha root))
+  pure $ result === Left (FileMissing (blobPath sha root))
   where
     sha = hashBS (encode a)
 
@@ -69,7 +66,7 @@ prop_retrive_after_colllect_garbage_with_root a = monadicIO $ run $ inTemporaryS
   pure $ result === Right a
 
 -- How do generate an arbitrary CasperT m a action?
--- runCasperT act1 >> runCasperT act2 = runCasperT (act1 >> act2)
+-- runCasperT store act1 >> runCasperT store act2 = runCasperT store (act1 >> act2)
 
 -- Test something with references
 
