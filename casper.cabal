@@ -1,50 +1,50 @@
-name:                casper
-version:             0.1.0.0
-synopsis:
-  Simple content-addressable store
--- description:
-homepage:            https://github.com/xc-jp/casper#readme
-license:             BSD3
-license-file:        LICENSE
-author:              Jonas Carpay
-maintainer:          jonascarpay@gmail.com
-copyright:           2020 Jonas Carpay
-category:            Web
-build-type:          Simple
-cabal-version:       >=1.10
-extra-source-files:  README.md
+cabal-version:      >=1.10
+name:               casper
+version:            0.1.0.0
+license:            BSD3
+license-file:       LICENSE
+copyright:          2020 Cross Compass Ltd.
+maintainer:         jonascarpay@gmail.com
+author:             Viktor Kronvall, Jonas Carpay
+homepage:           https://github.com/xc-jp/casper#readme
+synopsis:           Simple content-addressable store
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
 
 library
-  hs-source-dirs:      src
-  default-language:    Haskell2010
   exposed-modules:
-    Casper, Internal, Content
+    Casper
+    Content
+    Internal
+
+  hs-source-dirs:   src
+  default-language: Haskell2010
+  ghc-options:      -Wall
   build-depends:
-      base >= 4.7 && < 5
-    , bytestring
-    , mtl
-    , directory
-    , filepath
-    , cereal
-    , containers
-    , cryptohash-sha256
-    , base16-bytestring
-  ghc-options:
-    -Wall
+      base               >=4.7        && <5
+    , base16-bytestring  >=0.1.1.6    && <0.2
+    , bytestring         >=0.10.10.0  && <0.11
+    , cereal             >=0.5.8.1    && <0.6
+    , containers         >=0.6.2.1    && <0.7
+    , cryptohash-sha256  >=0.11.101.0 && <0.12
+    , directory          >=1.3.6.0    && <1.4
+    , filepath           >=1.4.2.1    && <1.5
+    , mtl                >=2.2.2      && <2.3
 
 test-suite casper-spec
-  hs-source-dirs: test
+  type:             exitcode-stdio-1.0
+  main-is:          Main.hs
+  hs-source-dirs:   test
   default-language: Haskell2010
-  type: exitcode-stdio-1.0
-  main-is: Main.hs
   build-depends:
-      base >= 4.7 && < 5
+      base              >=4.7      && <5
     , casper
-    , tasty
-    , tasty-quickcheck
-    , temporary
-    , tasty-hspec
-    , QuickCheck
-    , directory
-    , filepath
-    , mtl
+    , directory         >=1.3.6.0  && <1.4
+    , filepath          >=1.4.2.1  && <1.5
+    , mtl               >=2.2.2    && <2.3
+    , QuickCheck        >=2.14     && <2.15
+    , tasty             >=1.3.1    && <1.4
+    , tasty-hspec       >=1.1.5.1  && <1.2
+    , tasty-quickcheck  >=0.10.1.1 && <0.11
+    , temporary         >=1.3      && <1.4
