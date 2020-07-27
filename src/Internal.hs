@@ -27,12 +27,6 @@ data CasperError
   | StoreMetaMissing FilePath
   deriving (Show, Eq)
 
-roundTrip :: [Int] -> CasperT IO [Int]
-roundTrip is = do
-  refs <- traverse store is
-  ref <- store refs
-  retrieve ref >>= traverse retrieve
-
 newtype CasperT m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT Store m) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError)
 
@@ -78,8 +72,7 @@ collectGarbage = do
     getEverything :: MonadIO m => CasperT m (Set SHA256)
     getEverything = CasperT $ do
       root <- asks storeRoot
-      paths <- liftIO $ listDirectory root
-      let paths = filter (not . hasExtension) paths
+      paths <- liftIO $ listDirectory (root </> "blob")
       let shas = fmap (SHA256 . Char8.pack) paths
       pure $ S.fromList shas
 
@@ -134,7 +127,7 @@ writeStoreMeta meta = CasperT . lift . ReaderT $ \store -> do
   writeStoreMeta' meta store
 
 getMeta :: MonadIO m => SHA256 -> CasperT m ContentMeta
-getMeta sha = decodeFile ((<.> "meta") . blobPath sha) MetaMissing MetaCorrupt
+getMeta sha = decodeFile (metaPath sha) MetaMissing MetaCorrupt
 
 retrieve :: (Content a, MonadIO m) => Address a -> CasperT m a
 retrieve (Address sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
