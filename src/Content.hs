@@ -37,6 +37,7 @@ class Serialize a => Content a where
     [ref]
   references f a = greferences f (from a)
 
+-- TODO: Short bytestrings could lead to better memory performance here
 newtype SHA256 = SHA256 {unSHA256 :: BS.ByteString}
   deriving (Eq, Ord, Serialize)
 

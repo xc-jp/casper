@@ -7,12 +7,10 @@ module Casper
     Store,
     store,
     retrieve,
+    recall,
     runCasperT,
-    markRoot,
-    unmarkRoot,
     collectGarbage,
     initStore,
-    findStore,
     catchError,
   )
 where

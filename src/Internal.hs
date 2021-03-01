@@ -5,18 +5,20 @@
 module Internal where
 
 import Content
+import Control.Concurrent.STM
 import Control.Monad.Except
-import Control.Monad.Reader
+import Control.Monad.Reader (ReaderT (..), asks)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Base16 as Base16
+import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Char8 as Char8
+import qualified Data.ByteString.Lazy as LBS
 import Data.Serialize
 import Data.Set (Set)
 import qualified Data.Set as S
+import Numeric.Natural
 import System.Directory
 import System.FilePath
-import System.IO.Error (alreadyExistsErrorType, mkIOError)
 
 data CasperError
   = FileCorrupt FilePath String
@@ -54,30 +56,34 @@ mkMeta :: Content a => a -> ContentMeta
 mkMeta a = ContentMeta (S.fromList $ references' a)
 
 hashBS :: BS.ByteString -> SHA256
-hashBS = SHA256 . Base16.encode . SHA256.hash
+hashBS = SHA256 . SHA256.hash
 
 delete :: MonadIO m => SHA256 -> CasperT m ()
 delete sha = do
   CasperT (asks $ blobPath sha) >>= lift . liftIO . removeFile
   CasperT (asks $ metaPath sha) >>= lift . liftIO . removeFile
 
--- future optimization: traverse shared deps only once
-collectGarbage :: MonadIO m => CasperT m ()
-collectGarbage = do
-  rs <- roots
+collectGarbage :: MonadIO m => Store -> m (Set SHA256) -> m (Either CasperError ())
+collectGarbage s getRoots = do
+  liftIO $ atomically $ do
+    locked <- readTVar (gcLock s)
+    when locked retry
+    writeTVar (gcLock s) True
+  liftIO $ atomically $ do
+    active <- readTVar (activeBlocks s)
+    unless (active == 0) retry
+  rs <- getRoots
   everything <- getEverything
-  notGarbage <- closure (S.toList rs)
-  forM_ (S.toList $ everything S.\\ notGarbage) delete
+  liftIO $ atomically $ writeTVar (gcLock s) False
+  runCasperT s $ do
+    notGarbage <- closure (S.toList rs)
+    forM_ (S.toList $ everything S.\\ notGarbage) delete
   where
-    getEverything :: MonadIO m => CasperT m (Set SHA256)
-    getEverything = CasperT $ do
-      root <- asks storeRoot
-      paths <- liftIO $ listDirectory (root </> "blob")
+    getEverything :: MonadIO m => m (Set SHA256)
+    getEverything = do
+      paths <- liftIO $ listDirectory (storeRoot s </> "blob")
       let shas = fmap (SHA256 . Char8.pack) paths
       pure $ S.fromList shas
-
-newtype StoreMeta = StoreMeta {storeRoots :: Set SHA256}
-  deriving (Serialize)
 
 decodeFileWith ::
   (Serialize a, Monad m) =>
@@ -114,94 +120,89 @@ decodeFile ::
   CasperT m a
 decodeFile = decodeFileWith (liftIO . BS.readFile) (liftIO . doesFileExist)
 
-getStoreMeta :: MonadIO m => CasperT m StoreMeta
-getStoreMeta = decodeFile storeMetaPath StoreMetaMissing StoreMetaCorrupt
-
-writeStoreMeta' :: MonadIO m => StoreMeta -> Store -> m ()
-writeStoreMeta' meta store =
-  let path = storeMetaPath store
-   in liftIO $ BS.writeFile path (encode meta)
-
-writeStoreMeta :: MonadIO m => StoreMeta -> CasperT m ()
-writeStoreMeta meta = CasperT . lift . ReaderT $ \store -> do
-  writeStoreMeta' meta store
-
 getMeta :: MonadIO m => SHA256 -> CasperT m ContentMeta
 getMeta sha = decodeFile (metaPath sha) MetaMissing MetaCorrupt
+
+-- | Recall the address for a SHA256 hash in the store.
+-- If the content is not present in the store 'Nothing' is returned.
+recall :: (Content a, MonadIO m) => SHA256 -> CasperT m (Maybe (Address a))
+recall sha = CasperT $ do
+  content <- asks (blobPath sha) >>= liftIO . doesFileExist
+  meta <- asks (metaPath sha) >>= liftIO . doesFileExist
+  if content && meta then pure (Just (Address sha)) else pure Nothing
 
 retrieve :: (Content a, MonadIO m) => Address a -> CasperT m a
 retrieve (Address sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
 
-roots :: MonadIO m => CasperT m (Set SHA256)
-roots = storeRoots <$> getStoreMeta
-
 blobPath :: SHA256 -> Store -> FilePath
-blobPath (SHA256 sha) (Store root) = root </> "blob" </> Char8.unpack sha
+blobPath (SHA256 sha) s = storeRoot s </> "blob" </> Char8.unpack (Base64.encode sha)
 
 metaPath :: SHA256 -> Store -> FilePath
-metaPath (SHA256 sha) (Store root) = root </> "meta" </> Char8.unpack sha
-
-storeMetaPath :: Store -> FilePath
-storeMetaPath (Store root) = root </> "index"
+metaPath (SHA256 sha) s = storeRoot s </> "meta" </> Char8.unpack (Base64.encode sha)
 
 storeWith ::
-  (Content a, Monad m) =>
+  (Content a, MonadIO m) =>
   -- | File writer function
   (FilePath -> BS.ByteString -> m ()) ->
   -- | Value to store
   a ->
   -- | Address to stored value
   CasperT m (Address a)
-storeWith writeFile a = do
+storeWith writer a = do
   let bs = encode a
       sha = hashBS bs
       meta = mkMeta a
-  CasperT (asks $ blobPath sha) >>= writeCasper bs
-  CasperT (asks $ metaPath sha) >>= writeCasper (encode meta)
+  exists <- CasperT (asks $ metaPath sha) >>= liftIO . doesFileExist
+  unless exists $ do
+    CasperT (asks $ blobPath sha) >>= writeCasper bs
+    CasperT (asks $ metaPath sha) >>= writeCasper (encode meta)
   pure $ Address sha
   where
-    writeCasper content path = lift $ writeFile path content
+    writeCasper content path = lift $ writer path content
 
---
--- TODO: Write and hash lazily
 store :: (Content a, MonadIO m) => a -> CasperT m (Address a)
 store = storeWith ((liftIO .) . BS.writeFile)
 
-newtype Store = Store {storeRoot :: FilePath}
+-- | Atomically move a file into the store based on content
+storeFile :: MonadIO m => FilePath -> CasperT m (Address BS.ByteString)
+storeFile fp = do
+  sha <- liftIO $ SHA256 . SHA256.hashlazy <$> LBS.readFile fp
+  CasperT (asks $ metaPath sha) >>= liftIO . writeMeta
+  CasperT (asks $ blobPath sha) >>= liftIO . renameFile fp
+  pure $ Address sha
+  where
+    writeMeta :: FilePath -> IO ()
+    writeMeta metapath = BS.writeFile metapath (encode emptyMeta)
+    emptyMeta :: ContentMeta
+    emptyMeta = ContentMeta mempty
 
-markRoot :: MonadIO m => Address a -> CasperT m ()
-markRoot (Address sha) = do
-  StoreMeta roots <- getStoreMeta
-  writeStoreMeta $ StoreMeta (S.insert sha roots)
-
-unmarkRoot :: MonadIO m => Address a -> CasperT m ()
-unmarkRoot (Address sha) = do
-  StoreMeta roots <- getStoreMeta
-  writeStoreMeta $ StoreMeta (S.delete sha roots)
-
-isRoot :: MonadIO m => Address a -> CasperT m Bool
-isRoot (Address sha) = do
-  StoreMeta roots <- getStoreMeta
-  pure $ S.member sha roots
-
-data StoreError
-
-findStore :: FilePath -> IO Store
-findStore = pure . Store
+data Store = Store
+  { storeRoot :: FilePath,
+    gcLock :: TVar Bool,
+    activeBlocks :: TVar Natural
+  }
 
 initStore :: FilePath -> IO Store
 initStore path = do
   exists <- doesDirectoryExist path
   unless exists (createDirectory path)
   none <- emptyDirectory path
-  unless none (throwIO (mkIOError alreadyExistsErrorType "Path to store is not empty" Nothing (Just path)))
-  createDirectory (path </> "blob")
-  createDirectory (path </> "meta")
-  writeStoreMeta' (StoreMeta mempty) store
-  pure store
+  when none $ do
+    createDirectory (path </> "blob")
+    createDirectory (path </> "meta")
+  atomically $ do
+    locked <- newTVar False
+    active <- newTVar 0
+    pure $ Store path locked active
   where
     emptyDirectory = fmap null . listDirectory
-    store = Store path
 
 runCasperT :: MonadIO m => Store -> CasperT m a -> m (Either CasperError a)
-runCasperT store (CasperT action) = runReaderT (runExceptT action) store
+runCasperT s (CasperT action) = do
+  liftIO $ atomically $ do
+    locked <- readTVar $ gcLock s
+    when locked retry
+    modifyTVar (activeBlocks s) succ
+  x <- runReaderT (runExceptT action) s
+  liftIO $ atomically $ modifyTVar (activeBlocks s) pred
+  pure x
