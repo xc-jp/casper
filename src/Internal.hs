@@ -6,6 +6,7 @@ module Internal where
 
 import Content
 import Control.Concurrent.STM
+import Control.Monad.Catch
 import Control.Monad.Except
 import Control.Monad.Reader (ReaderT (..), asks)
 import qualified Crypto.Hash.SHA256 as SHA256
@@ -30,7 +31,7 @@ data CasperError
   deriving (Show, Eq)
 
 newtype CasperT m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT Store m) a}
-  deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError)
+  deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError, MonadCatch, MonadThrow, MonadMask)
 
 instance MonadTrans CasperT where
   lift = CasperT . lift . lift

@@ -13,6 +13,7 @@ module Content
 where
 
 import Data.ByteString as BS
+import qualified Data.ByteString.Base64.URL as Base64
 import Data.ByteString.Lazy as BL
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap (IntMap)
@@ -43,6 +44,9 @@ newtype SHA256 = SHA256 {unSHA256 :: BS.ByteString}
 
 newtype Address a = Address {forget :: SHA256}
   deriving (Eq, Ord, Serialize)
+
+instance Show (Address a) where
+  show (Address (SHA256 a)) = show $ Base64.encode a
 
 class GContent a where greferences :: (forall b. Address b -> ref) -> a x -> [ref]
 
