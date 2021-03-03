@@ -40,7 +40,11 @@ class Serialize a => Content a where
 
 -- TODO: Short bytestrings could lead to better memory performance here
 newtype SHA256 = SHA256 {unSHA256 :: BS.ByteString}
-  deriving (Eq, Ord, Serialize)
+  deriving (Eq, Ord)
+
+instance Serialize SHA256 where
+  put = putByteString . unSHA256
+  get = SHA256 <$> getByteString 32
 
 newtype Address a = Address {forget :: SHA256}
   deriving (Eq, Ord, Serialize)

@@ -23,15 +23,18 @@ library
   ghc-options:      -Wall
   build-depends:
       base               >=4.7 && <5
+    , base16-bytestring
     , base64-bytestring
     , bytestring
     , cereal
     , containers
-    , cryptohash-sha256
+    , cryptonite
     , directory
     , exceptions
     , filepath
+    , memory
     , mtl
+    , process
     , stm
 
 test-suite casper-spec
