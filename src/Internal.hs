@@ -5,26 +5,27 @@
 module Internal where
 
 import Content
-import Control.Concurrent (forkIO)
 import Control.Concurrent.STM
 import Control.Monad.Catch
 import Control.Monad.Except
 import Control.Monad.Reader (ReaderT (..), ask, asks)
 import qualified Crypto.Hash as Crypto
+import Data.Bits
 import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Base64.URL as Base64
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as Char8
-import Data.Serialize
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Short as BShort
+import qualified Data.ByteString.Unsafe as BU
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.String (IsString (fromString))
-import Debug.Trace (traceShow)
+import Data.Word (Word64)
 import Numeric.Natural
 import System.Directory
 import System.FilePath
-import System.IO (hGetContents)
 import System.Process
 
 data CasperError
@@ -46,7 +47,51 @@ references' :: Content a => a -> [SHA256]
 references' = references forget
 
 newtype ContentMeta = ContentMeta {deps :: Set SHA256}
-  deriving (Serialize)
+
+encodeMeta :: ContentMeta -> BS.ByteString
+encodeMeta (ContentMeta shas) =
+  BL.toStrict $ Builder.toLazyByteString $
+    Builder.word64BE (fromIntegral $ S.size shas)
+      <> foldMap (Builder.byteString . encodeSha) shas
+  where
+    encodeSha (SHA256 s) = BShort.fromShort s
+
+decodeMeta :: BS.ByteString -> Either String ContentMeta
+decodeMeta x = do
+  (n, rest) <- getWord64BE x
+  shas <- parseShas n rest
+  pure $ ContentMeta $ S.fromList shas
+  where
+    parseShas 0 _ = pure []
+    parseShas n bs = do
+      (a, rest) <- ensure 32 bs
+      let sha = SHA256 (BShort.toShort a)
+      shas <- parseShas (pred n) rest
+      pure (sha : shas)
+
+ensure :: Int -> BS.ByteString -> Either String (BS.ByteString, BS.ByteString)
+ensure n bs =
+  let (a, rest) = BS.splitAt n bs
+   in if BS.length a == n
+        then pure (a, rest)
+        else Left $ "Failed to get " <> show n <> " bytes"
+
+getWord64BE :: BS.ByteString -> Either String (Word64, BS.ByteString)
+getWord64BE x = do
+  (nBytes, rest) <- ensure 8 x
+  let n = unsafeWord64be nBytes
+  pure (n, rest)
+  where
+    unsafeWord64be :: BS.ByteString -> Word64
+    unsafeWord64be s =
+      (fromIntegral (s `BU.unsafeIndex` 0) `shiftL` 56)
+        .|. (fromIntegral (s `BU.unsafeIndex` 1) `shiftL` 48)
+        .|. (fromIntegral (s `BU.unsafeIndex` 2) `shiftL` 40)
+        .|. (fromIntegral (s `BU.unsafeIndex` 3) `shiftL` 32)
+        .|. (fromIntegral (s `BU.unsafeIndex` 4) `shiftL` 24)
+        .|. (fromIntegral (s `BU.unsafeIndex` 5) `shiftL` 16)
+        .|. (fromIntegral (s `BU.unsafeIndex` 6) `shiftL` 8)
+        .|. fromIntegral (s `BU.unsafeIndex` 7)
 
 closure :: MonadIO m => [SHA256] -> CasperT m (Set SHA256)
 closure = go mempty
@@ -70,17 +115,17 @@ shasumFiles files = do
   where
     parseLine str = case Char8.words str of
       [a, _] -> case Base16.decode a of
-        (x, bs) | BS.null bs -> pure (SHA256 x)
+        Right x -> pure (SHA256 (BShort.toShort x))
         _ -> []
       _ -> []
 
 -- | Store files based on output of `sha256sum` command
-storeFiles :: MonadIO m => [FilePath] -> CasperT m [Address BS.ByteString]
+storeFiles :: MonadIO m => [FilePath] -> CasperT m [Ref BS.ByteString]
 storeFiles files = do
   hashes <- liftIO $ shasumFiles files
   zipWithM storeFile hashes files
   where
-    emptyMeta = encode $ ContentMeta mempty
+    emptyMeta = encodeMeta $ ContentMeta mempty
     storeFile sha file = do
       s <- CasperT ask
       liftIO $ do
@@ -88,13 +133,13 @@ storeFiles files = do
         unless exists $ do
           copyFile file (blobPath sha s)
           BS.writeFile (metaPath sha s) emptyMeta
-      pure (Address sha)
+      pure (Ref sha)
 
 mkMeta :: Content a => a -> ContentMeta
 mkMeta a = ContentMeta (S.fromList $ references' a)
 
 hashBS :: BS.ByteString -> SHA256
-hashBS = SHA256 . ByteArray.convert . Crypto.hashWith Crypto.SHA256
+hashBS = SHA256 . BShort.toShort . ByteArray.convert . Crypto.hashWith Crypto.SHA256
 
 delete :: MonadIO m => SHA256 -> CasperT m ()
 delete sha = do
@@ -120,13 +165,19 @@ collectGarbage s getRoots = do
     getEverything :: MonadIO m => m (Set SHA256)
     getEverything = do
       paths <- liftIO $ listDirectory (storeRoot s </> "blob")
-      let shas = fmap (SHA256 . Char8.pack) paths
+      let shas = fmap unsafeReadSHA paths
       pure $ S.fromList shas
+      where
+        unsafeReadSHA :: String -> SHA256
+        unsafeReadSHA name =
+          case Base64.decode (Char8.pack name) of
+            Left _ -> error $ "internal error, cannot parse " <> name <> " as SHA256"
+            Right x -> SHA256 $ BShort.toShort x
 
 decodeFileWith ::
-  (Serialize a, Monad m) =>
+  (Monad m) =>
   -- | File reader
-  (FilePath -> m BS.ByteString) ->
+  (FilePath -> m (Either String a)) ->
   -- | Does path exist?
   (FilePath -> m Bool) ->
   -- | Path to file
@@ -141,13 +192,13 @@ decodeFileWith reader checkExist getPath eMissing eCorrupt = do
   path <- CasperT $ asks getPath
   exists <- lift $ checkExist path
   unless exists $ throwError (eMissing path)
-  bs <- lift $ reader path
-  case decode bs of
+  result <- lift $ reader path
+  case result of
     Right a -> pure a
     Left err -> throwError (eCorrupt path err)
 
 decodeFile ::
-  (Serialize a, MonadIO m) =>
+  (Content a, MonadIO m) =>
   -- | Path to file
   (Store -> FilePath) ->
   -- | Missing path error
@@ -156,27 +207,28 @@ decodeFile ::
   (FilePath -> String -> CasperError) ->
   -- | Decoded value
   CasperT m a
-decodeFile = decodeFileWith (liftIO . BS.readFile) (liftIO . doesFileExist)
+decodeFile = decodeFileWith (fmap decodeContent . liftIO . BS.readFile) (liftIO . doesFileExist)
 
 getMeta :: MonadIO m => SHA256 -> CasperT m ContentMeta
-getMeta sha = decodeFile (metaPath sha) MetaMissing MetaCorrupt
+getMeta sha = do
+  decodeFileWith (fmap decodeMeta . liftIO . BS.readFile) (liftIO . doesFileExist) (metaPath sha) MetaMissing MetaCorrupt
 
--- | Recall the address for a SHA256 hash in the store.
+-- | Recall the reference for a SHA256 hash in the store.
 -- If the content is not present in the store 'Nothing' is returned.
-recall :: (Content a, MonadIO m) => SHA256 -> CasperT m (Maybe (Address a))
+recall :: (Content a, MonadIO m) => SHA256 -> CasperT m (Maybe (Ref a))
 recall sha = CasperT $ do
   content <- asks (blobPath sha) >>= liftIO . doesFileExist
   meta <- asks (metaPath sha) >>= liftIO . doesFileExist
-  if content && meta then pure (Just (Address sha)) else pure Nothing
+  if content && meta then pure (Just (Ref sha)) else pure Nothing
 
-retrieve :: (Content a, MonadIO m) => Address a -> CasperT m a
-retrieve (Address sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
+retrieve :: (Content a, MonadIO m) => Ref a -> CasperT m a
+retrieve (Ref sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
 
 blobPath :: SHA256 -> Store -> FilePath
-blobPath (SHA256 sha) s = storeRoot s </> "blob" </> Char8.unpack (Base64.encode sha)
+blobPath (SHA256 sha) s = storeRoot s </> "blob" </> show sha
 
 metaPath :: SHA256 -> Store -> FilePath
-metaPath (SHA256 sha) s = storeRoot s </> "meta" </> Char8.unpack (Base64.encode sha)
+metaPath (SHA256 sha) s = storeRoot s </> "meta" </> show sha
 
 storeWith ::
   (Content a, MonadIO m) =>
@@ -184,21 +236,21 @@ storeWith ::
   (FilePath -> BS.ByteString -> m ()) ->
   -- | Value to store
   a ->
-  -- | Address to stored value
-  CasperT m (Address a)
+  -- | Ref to stored value
+  CasperT m (Ref a)
 storeWith writer a = do
-  let bs = encode a
+  let bs = encodeContent a
       sha = hashBS bs
       meta = mkMeta a
   exists <- CasperT (asks $ metaPath sha) >>= liftIO . doesFileExist
   unless exists $ do
     CasperT (asks $ blobPath sha) >>= writeCasper bs
-    CasperT (asks $ metaPath sha) >>= writeCasper (encode meta)
-  pure $ Address sha
+    CasperT (asks $ metaPath sha) >>= writeCasper (encodeMeta meta)
+  pure $ Ref sha
   where
     writeCasper content path = lift $ writer path content
 
-store :: (Content a, MonadIO m) => a -> CasperT m (Address a)
+store :: (Content a, MonadIO m) => a -> CasperT m (Ref a)
 store = storeWith ((liftIO .) . BS.writeFile)
 
 data Store = Store
