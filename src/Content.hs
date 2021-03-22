@@ -54,7 +54,13 @@ newtype SHA256 = SHA256 {unSHA256 :: BShort.ShortByteString}
   deriving (Eq, Ord)
 
 instance Show SHA256 where
-  show (SHA256 a) = show $ Base64.encode (BShort.fromShort a)
+  show (SHA256 a) = BChar.unpack $ Base64.encode (BShort.fromShort a)
+
+instance Read SHA256 where
+  readsPrec _ s =
+    case Base64.decode (BChar.pack s) of
+      Left _ -> []
+      Right x -> pure (SHA256 (BShort.toShort x), "")
 
 newtype Ref a = Ref {forget :: SHA256}
   deriving (Eq, Ord)

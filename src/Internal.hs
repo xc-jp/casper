@@ -14,7 +14,6 @@ import Data.Bits
 import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base16 as Base16
-import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as BL
@@ -165,14 +164,8 @@ collectGarbage s getRoots = do
     getEverything :: MonadIO m => m (Set SHA256)
     getEverything = do
       paths <- liftIO $ listDirectory (storeRoot s </> "blob")
-      let shas = fmap unsafeReadSHA paths
+      let shas = fmap read paths
       pure $ S.fromList shas
-      where
-        unsafeReadSHA :: String -> SHA256
-        unsafeReadSHA name =
-          case Base64.decode (Char8.pack name) of
-            Left _ -> error $ "internal error, cannot parse " <> name <> " as SHA256"
-            Right x -> SHA256 $ BShort.toShort x
 
 decodeFileWith ::
   (Monad m) =>
@@ -225,10 +218,10 @@ retrieve :: (Content a, MonadIO m) => Ref a -> CasperT m a
 retrieve (Ref sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
 
 blobPath :: SHA256 -> Store -> FilePath
-blobPath (SHA256 sha) s = storeRoot s </> "blob" </> show sha
+blobPath sha s = storeRoot s </> "blob" </> show sha
 
 metaPath :: SHA256 -> Store -> FilePath
-metaPath (SHA256 sha) s = storeRoot s </> "meta" </> show sha
+metaPath sha s = storeRoot s </> "meta" </> show sha
 
 storeWith ::
   (Content a, MonadIO m) =>
