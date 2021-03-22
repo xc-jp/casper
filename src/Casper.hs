@@ -1,9 +1,9 @@
 module Casper
-  ( module Re,
-    CasperT,
+  ( CasperT,
     CasperError,
-    Address,
+    Ref,
     Content (..),
+    JSONContent,
     SHA256 (..),
     Store,
     store,
@@ -20,5 +20,4 @@ where
 
 import Content
 import Control.Monad.Except (catchError)
-import Data.Serialize as Re
 import Internal
