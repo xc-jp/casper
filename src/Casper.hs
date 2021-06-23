@@ -15,6 +15,7 @@ module Casper
     collectGarbage,
     initStore,
     catchError,
+    hashBS,
   )
 where
 
