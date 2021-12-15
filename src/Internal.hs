@@ -8,14 +8,12 @@ import Content
 import Control.Concurrent.STM
 import Control.Monad.Catch
 import Control.Monad.Except
-import Control.Monad.Reader (ReaderT (..), ask, asks)
+import Control.Monad.Reader (ReaderT (..), asks)
 import qualified Crypto.Hash as Crypto
 import Data.Bits
 import qualified Data.ByteArray as ByteArray
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Base16 as Base16
 import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Char8 as Char8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Short as BShort
 import qualified Data.ByteString.Unsafe as BU
@@ -25,7 +23,6 @@ import Data.Word (Word64)
 import Numeric.Natural
 import System.Directory
 import System.FilePath
-import System.Process
 
 data CasperError
   = FileCorrupt FilePath String
@@ -49,9 +46,10 @@ newtype ContentMeta = ContentMeta {deps :: Set SHA256}
 
 encodeMeta :: ContentMeta -> BS.ByteString
 encodeMeta (ContentMeta shas) =
-  BL.toStrict $ Builder.toLazyByteString $
-    Builder.word64BE (fromIntegral $ S.size shas)
-      <> foldMap (Builder.byteString . encodeSha) shas
+  BL.toStrict $
+    Builder.toLazyByteString $
+      Builder.word64BE (fromIntegral $ S.size shas)
+        <> foldMap (Builder.byteString . encodeSha) shas
   where
     encodeSha (SHA256 s) = BShort.fromShort s
 
@@ -103,37 +101,6 @@ closure = go mempty
         go (S.insert h checked) (transitive <> t)
     dependencies sha = S.toList . deps <$> getMeta sha
 
-shasumFiles :: [FilePath] -> IO [SHA256]
-shasumFiles files = do
-  withCreateProcess ((proc "sha256sum" ("-b" : files)) {std_out = CreatePipe}) $
-    \_ mstdout _ procHandle -> do
-      stdout <- maybe (fail "Couldn't get stdout handle in sha256sum") pure mstdout
-      content <- BS.hGetContents stdout
-      _ <- waitForProcess procHandle
-      pure $ concatMap parseLine (Char8.lines content)
-  where
-    parseLine str = case Char8.words str of
-      [a, _] -> case Base16.decode a of
-        Right x -> pure (SHA256 (BShort.toShort x))
-        _ -> []
-      _ -> []
-
--- | Store files based on output of `sha256sum` command
-storeFiles :: MonadIO m => [FilePath] -> CasperT m [Ref BS.ByteString]
-storeFiles files = do
-  hashes <- liftIO $ shasumFiles files
-  zipWithM storeFile hashes files
-  where
-    emptyMeta = encodeMeta $ ContentMeta mempty
-    storeFile sha file = do
-      s <- CasperT ask
-      liftIO $ do
-        exists <- doesFileExist (metaPath sha s)
-        unless exists $ do
-          copyFile file (blobPath sha s)
-          BS.writeFile (metaPath sha s) emptyMeta
-      pure (Ref sha)
-
 mkMeta :: Content a => a -> ContentMeta
 mkMeta a = ContentMeta (S.fromList $ references' a)
 
@@ -147,11 +114,11 @@ delete sha = do
 
 collectGarbage :: MonadIO m => Store -> m (Set SHA256) -> m (Either CasperError ())
 collectGarbage s getRoots = do
-  liftIO $ atomically $ do
+  liftIO . atomically $ do
     locked <- readTVar (gcLock s)
     when locked retry
     writeTVar (gcLock s) True
-  liftIO $ atomically $ do
+  liftIO . atomically $ do
     active <- readTVar (activeBlocks s)
     unless (active == 0) retry
   rs <- getRoots
@@ -269,7 +236,7 @@ initStore path = do
 
 runCasperT :: MonadIO m => Store -> CasperT m a -> m (Either CasperError a)
 runCasperT s (CasperT action) = do
-  liftIO $ atomically $ do
+  liftIO . atomically $ do
     locked <- readTVar $ gcLock s
     when locked retry
     modifyTVar (activeBlocks s) succ

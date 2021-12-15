@@ -8,7 +8,6 @@ module Casper
     Store,
     store,
     retrieve,
-    storeFiles,
     forget,
     recall,
     runCasperT,
