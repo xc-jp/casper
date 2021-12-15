@@ -190,32 +190,42 @@ blobPath sha s = storeRoot s </> "blob" </> show sha
 metaPath :: SHA256 -> Store -> FilePath
 metaPath sha s = storeRoot s </> "meta" </> show sha
 
-storeWith ::
-  (Content a, MonadIO m) =>
-  -- | File writer function
-  (FilePath -> BS.ByteString -> m ()) ->
+store ::
+  (Content a, MonadMask m, MonadIO m) =>
   -- | Value to store
   a ->
   -- | Ref to stored value
   CasperT m (Ref a)
-storeWith writer a = do
-  let bs = encodeContent a
-      sha = hashBS bs
-      meta = mkMeta a
-  exists <- CasperT (asks $ metaPath sha) >>= liftIO . doesFileExist
+store a = withFileLock sha . CasperT $ do
+  exists <- asks (metaPath sha) >>= liftIO . doesFileExist
   unless exists $ do
-    CasperT (asks $ blobPath sha) >>= writeCasper bs
-    CasperT (asks $ metaPath sha) >>= writeCasper (encodeMeta meta)
+    asks (blobPath sha) >>= writeCasper bs
+    asks (metaPath sha) >>= writeCasper (encodeMeta meta)
   pure $ Ref sha
   where
-    writeCasper content path = lift $ writer path content
+    writeCasper content path = liftIO $ BS.writeFile path content
+    bs = encodeContent a
+    sha = hashBS bs
+    meta = mkMeta a
 
-store :: (Content a, MonadIO m) => a -> CasperT m (Ref a)
-store = storeWith ((liftIO .) . BS.writeFile)
+withFileLock :: (MonadMask m, MonadIO m) => SHA256 -> CasperT m a -> CasperT m a
+withFileLock sha run = do
+  lockVar <- CasperT (asks fileLocks)
+  bracket_ (acquire lockVar) (release lockVar) run
+  where
+    acquire lockVar = liftIO . atomically $ do
+      locks <- readTVar lockVar
+      let isLocked = S.member sha locks
+      when isLocked retry
+      modifyTVar lockVar (S.insert sha)
+    release lockVar =
+      liftIO . atomically $
+        modifyTVar lockVar (S.delete sha)
 
 data Store = Store
   { storeRoot :: FilePath,
     gcLock :: TVar Bool,
+    fileLocks :: TVar (Set SHA256),
     activeBlocks :: TVar Natural
   }
 
@@ -230,7 +240,8 @@ initStore path = do
   atomically $ do
     locked <- newTVar False
     active <- newTVar 0
-    pure $ Store path locked active
+    locks <- newTVar mempty
+    pure $ Store path locked locks active
   where
     emptyDirectory = fmap null . listDirectory
 
