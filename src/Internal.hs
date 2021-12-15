@@ -112,7 +112,7 @@ delete sha = do
   CasperT (asks $ blobPath sha) >>= lift . liftIO . removeFile
   CasperT (asks $ metaPath sha) >>= lift . liftIO . removeFile
 
-collectGarbage :: MonadIO m => Store -> m (Set SHA256) -> m (Either CasperError ())
+collectGarbage :: (MonadMask m, MonadIO m) => Store -> m (Set SHA256) -> m (Either CasperError ())
 collectGarbage s getRoots = do
   liftIO . atomically $ do
     locked <- readTVar (gcLock s)
@@ -245,12 +245,18 @@ initStore path = do
   where
     emptyDirectory = fmap null . listDirectory
 
-runCasperT :: MonadIO m => Store -> CasperT m a -> m (Either CasperError a)
+runCasperT :: (MonadMask m, MonadIO m) => Store -> CasperT m a -> m (Either CasperError a)
 runCasperT s (CasperT action) = do
-  liftIO . atomically $ do
-    locked <- readTVar $ gcLock s
-    when locked retry
-    modifyTVar (activeBlocks s) succ
-  x <- runReaderT (runExceptT action) s
-  liftIO $ atomically $ modifyTVar (activeBlocks s) pred
-  pure x
+  withActiveBlock s $
+    runReaderT (runExceptT action) s
+
+withActiveBlock :: (MonadMask m, MonadIO m) => Store -> m a -> m a
+withActiveBlock s = bracket_ acquire release
+  where
+    acquire =
+      liftIO . atomically $ do
+        locked <- readTVar $ gcLock s
+        when locked retry
+        modifyTVar (activeBlocks s) succ
+    release =
+      liftIO $ atomically $ modifyTVar (activeBlocks s) pred
