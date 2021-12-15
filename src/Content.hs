@@ -37,16 +37,17 @@ import Numeric.Natural
 
 class Content a where
   references :: (forall b. Ref b -> ref) -> a -> [ref]
+  encodeContent :: a -> BS.ByteString
+  decodeContent :: BS.ByteString -> Either String a
+
   default references ::
     (Generic a, GContent (Rep a)) =>
     (forall b. Ref b -> ref) ->
     a ->
     [ref]
   references f a = greferences f (from a)
-  encodeContent :: a -> BS.ByteString
   default encodeContent :: (Aeson.ToJSON a) => a -> BS.ByteString
   encodeContent = BL.toStrict . Aeson.encode
-  decodeContent :: BS.ByteString -> Either String a
   default decodeContent :: Aeson.FromJSON a => BS.ByteString -> Either String a
   decodeContent = Aeson.eitherDecodeStrict'
 
