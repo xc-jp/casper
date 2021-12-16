@@ -6,7 +6,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Content
+module Casper.Content
   ( SHA256 (..),
     Ref (..),
     Content (..),
@@ -178,6 +178,8 @@ deriving instance Content Any
 
 deriving instance Content All
 
+type JSONContent a = (Aeson.FromJSON a, Aeson.ToJSON a, Content a)
+
 deriving instance JSONContent a => Content (Product a)
 
 deriving instance JSONContent a => Content (Dual a)
@@ -187,8 +189,6 @@ deriving instance JSONContent a => Content (Sum a)
 deriving instance JSONContent a => Content (First a)
 
 deriving instance JSONContent a => Content (Last a)
-
-type JSONContent a = (Aeson.FromJSON a, Aeson.ToJSON a, Content a)
 
 instance (JSONContent a) => Content [a]
 

@@ -15,9 +15,14 @@ module Casper
     initStore,
     catchError,
     hashBS,
+    newResource,
+    readResource,
+    writeResource,
+    modifyResource,
+    getRoot,
   )
 where
 
-import Content
+import Casper.Content
+import Casper.Internal
 import Control.Monad.Except (catchError)
-import Internal
