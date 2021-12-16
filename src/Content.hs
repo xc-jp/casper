@@ -35,6 +35,19 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics
 import Numeric.Natural
 
+data GUID
+
+newtype Loc a = Loc GUID
+
+class Resource a where
+  references' ::
+    (forall b. Loc b -> loc) ->
+    (forall b. Ref b -> ref) ->
+    a ->
+    ([loc], [ref])
+  encodeResource :: a -> BS.ByteString
+  decodeResource :: BS.ByteString -> Either String a
+
 class Content a where
   references :: (forall b. Ref b -> ref) -> a -> [ref]
   encodeContent :: a -> BS.ByteString

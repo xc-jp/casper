@@ -33,7 +33,7 @@ data CasperError
   | StoreMetaMissing FilePath
   deriving (Show, Eq)
 
-newtype CasperT m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT Store m) a}
+newtype CasperT root m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT (Store root) m) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError, MonadCatch, MonadThrow, MonadMask)
 
 instance MonadTrans CasperT where
@@ -112,7 +112,7 @@ delete sha = do
   CasperT (asks $ blobPath sha) >>= lift . liftIO . removeFile
   CasperT (asks $ metaPath sha) >>= lift . liftIO . removeFile
 
-collectGarbage :: (MonadMask m, MonadIO m) => Store -> m (Set SHA256) -> m (Either CasperError ())
+collectGarbage :: (MonadMask m, MonadIO m) => Store s -> m (Set SHA256) -> m (Either CasperError ())
 collectGarbage s getRoots = do
   liftIO . atomically $ do
     locked <- readTVar (gcLock s)
@@ -130,7 +130,7 @@ collectGarbage s getRoots = do
   where
     getEverything :: MonadIO m => m (Set SHA256)
     getEverything = do
-      paths <- liftIO $ listDirectory (storeRoot s </> "blob")
+      paths <- liftIO $ listDirectory (storeDir s </> "blob")
       let shas = fmap read paths
       pure $ S.fromList shas
 
@@ -185,10 +185,10 @@ retrieve :: (Content a, MonadIO m) => Ref a -> CasperT m a
 retrieve (Ref sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
 
 blobPath :: SHA256 -> Store -> FilePath
-blobPath sha s = storeRoot s </> "blob" </> show sha
+blobPath sha s = storeDir s </> "blob" </> show sha
 
 metaPath :: SHA256 -> Store -> FilePath
-metaPath sha s = storeRoot s </> "meta" </> show sha
+metaPath sha s = storeDir s </> "meta" </> show sha
 
 store ::
   (Content a, MonadMask m, MonadIO m) =>
@@ -222,8 +222,11 @@ withFileLock sha run = do
       liftIO . atomically $
         modifyTVar lockVar (S.delete sha)
 
-data Store = Store
-  { storeRoot :: FilePath,
+unsafeGetRoot :: CasperT whatever
+unsafeGetRoot = pure $ Loc 0
+
+data Store root = Store
+  { storeDir :: FilePath,
     gcLock :: TVar Bool,
     fileLocks :: TVar (Set SHA256),
     activeBlocks :: TVar Natural
@@ -244,6 +247,32 @@ initStore path = do
     pure $ Store path locked locks active
   where
     emptyDirectory = fmap null . listDirectory
+
+-- dataset
+-- job
+-- modelset
+-- model
+
+-- data GUID
+
+-- newtype Resource a = Resource GUID
+--
+
+-- Resources are content
+-- Resources point to content/anything serializable can be turned into a resource
+
+-- yes/pointers
+-- no/anything serializable
+
+-- r :: Loc [Loc a]
+-- readResource :: Loc [Loc a] -> IO (Ref [Loc a])
+-- Resource (Ref a)
+
+-- Resource [Resource (Ref a)]
+
+-- newResource :: Ref a -> IO (Resource a)
+-- readResource :: Resource a -> IO (Ref a)
+-- writeResource :: Resource a -> (Ref a) -> IO ()
 
 runCasperT :: (MonadMask m, MonadIO m) => Store -> CasperT m a -> m (Either CasperError a)
 runCasperT s (CasperT action) = do
