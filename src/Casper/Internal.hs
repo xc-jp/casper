@@ -201,6 +201,9 @@ available s = do
 
 type ResourceState = (Set UUID.UUID, Set SHA256, Set SHA256)
 
+-- | Collect all resources and resource blobs accessible from the root resource
+-- as well as objects that are direct dependencies of any of the accessible
+-- resources.
 resourceClosure :: (MonadIO m) => CasperT root m ResourceState
 resourceClosure = go mempty [UUID.nil]
   where
@@ -216,6 +219,7 @@ resourceClosure = go mempty [UUID.nil]
               )
         go transitive (S.toList resources' <> t)
 
+-- | Compute the transitive closure of a set of blob hashes
 closure :: (MonadIO m, Foldable t) => t SHA256 -> CasperT root m (Set SHA256)
 closure = go mempty . toList
   where
@@ -446,6 +450,13 @@ modifyResource :: (Resource a, MonadMask m, MonadIO m) => (a -> a) -> Loc a -> C
 modifyResource f (Loc uuid) = withResourceLock uuid $ do
   x <- unsafeReadResource uuid
   unsafeWriteResource uuid (f x)
+
+-- | Spot the location of a resource in the store given its UUID.
+-- If the resource is not present in the store 'Nothing' is returned.
+spot :: (Resource a, MonadIO m) => UUID.UUID -> CasperT root m (Maybe (Loc a))
+spot uuid = CasperT $ do
+  meta <- asks (resourcePath uuid) >>= liftIO . doesFileExist
+  if meta then pure (Just (Loc uuid)) else pure Nothing
 
 withResourceLock :: (MonadMask m, MonadIO m) => UUID.UUID -> CasperT root m a -> CasperT root m a
 withResourceLock uuid run = do
