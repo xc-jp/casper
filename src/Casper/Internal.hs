@@ -45,10 +45,10 @@ data CasperError
   | StoreMetaMissing FilePath
   deriving (Show, Eq)
 
-newtype CasperT root m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT (Store root) m) a}
+newtype CasperT s root m a = CasperT {unCasperT :: ExceptT CasperError (ReaderT (Store root) m) a}
   deriving (Functor, Applicative, Monad, MonadIO, MonadError CasperError, MonadCatch, MonadThrow, MonadMask)
 
-instance MonadTrans (CasperT root) where
+instance MonadTrans (CasperT s root) where
   lift = CasperT . lift . lift
 
 hashes :: Content a => a -> [SHA256]
@@ -149,13 +149,13 @@ getWord64BE x = do
         .|. (fromIntegral (s `BU.unsafeIndex` 6) `shiftL` 8)
         .|. fromIntegral (s `BU.unsafeIndex` 7)
 
-deleteBlob :: MonadIO m => SHA256 -> CasperT root m ()
+deleteBlob :: MonadIO m => SHA256 -> CasperT s root m ()
 deleteBlob sha = CasperT (asks $ blobPath sha) >>= lift . liftIO . removeFile
 
-deleteObject :: MonadIO m => SHA256 -> CasperT root m ()
+deleteObject :: MonadIO m => SHA256 -> CasperT s root m ()
 deleteObject sha = CasperT (asks $ contentPath sha) >>= lift . liftIO . removeFile
 
-deleteResource :: MonadIO m => UUID.UUID -> CasperT root m ()
+deleteResource :: MonadIO m => UUID.UUID -> CasperT s root m ()
 deleteResource uuid = CasperT (asks $ resourcePath uuid) >>= lift . liftIO . removeFile
 
 collectGarbage :: (MonadMask m, MonadIO m) => Store s -> m (Either CasperError ())
@@ -204,7 +204,7 @@ type ResourceState = (Set UUID.UUID, Set SHA256, Set SHA256)
 -- | Collect all resources and resource blobs accessible from the root resource
 -- as well as objects that are direct dependencies of any of the accessible
 -- resources.
-resourceClosure :: (MonadIO m) => CasperT root m ResourceState
+resourceClosure :: (MonadIO m) => CasperT s root m ResourceState
 resourceClosure = go mempty [UUID.nil]
   where
     go checked [] = pure checked
@@ -220,7 +220,7 @@ resourceClosure = go mempty [UUID.nil]
         go transitive (S.toList resources' <> t)
 
 -- | Compute the transitive closure of a set of blob hashes
-closure :: (MonadIO m, Foldable t) => t SHA256 -> CasperT root m (Set SHA256)
+closure :: (MonadIO m, Foldable t) => t SHA256 -> CasperT s root m (Set SHA256)
 closure = go mempty . toList
   where
     go checked [] = pure checked
@@ -250,7 +250,7 @@ decodeFileWith ::
   -- | Corrupt file error
   (FilePath -> String -> CasperError) ->
   -- | Decoded value
-  CasperT root m a
+  CasperT s root m a
 decodeFileWith reader checkExist getPath eMissing eCorrupt = do
   path <- CasperT $ asks getPath
   exists <- lift $ checkExist path
@@ -269,10 +269,10 @@ decodeFile ::
   -- | Corrupt path error
   (FilePath -> String -> CasperError) ->
   -- | Decoded value
-  CasperT root m a
+  CasperT s root m a
 decodeFile = decodeFileWith (fmap decodeContent . liftIO . BS.readFile) (liftIO . doesFileExist)
 
-getMeta :: MonadIO m => SHA256 -> CasperT root m ContentMeta
+getMeta :: MonadIO m => SHA256 -> CasperT s root m ContentMeta
 getMeta sha =
   decodeFileWith
     (fmap decodeMeta . liftIO . BS.readFile)
@@ -284,7 +284,7 @@ getMeta sha =
 getResourceMeta ::
   MonadIO m =>
   UUID.UUID ->
-  CasperT root m ResourceMeta
+  CasperT s root m ResourceMeta
 getResourceMeta uuid = CasperT $ do
   s <- ask
   let path = resourcePath uuid s
@@ -295,14 +295,14 @@ getResourceMeta uuid = CasperT $ do
 
 -- | Recall the reference for a SHA256 hash in the store.
 -- If the content is not present in the store 'Nothing' is returned.
-recall :: (Content a, MonadIO m) => SHA256 -> CasperT root m (Maybe (Ref a))
+recall :: (Content a, MonadIO m) => SHA256 -> CasperT s root m (Maybe (Ref s a))
 recall sha = CasperT $ do
   content <- asks (blobPath sha) >>= liftIO . doesFileExist
   meta <- asks (contentPath sha) >>= liftIO . doesFileExist
   if content && meta then pure (Just (Ref sha)) else pure Nothing
 
 -- | Retrieve content from the store using a reference
-retrieve :: (Content a, MonadIO m) => Ref a -> CasperT root m a
+retrieve :: (Content a, MonadIO m) => Ref s a -> CasperT s root m a
 retrieve (Ref sha) = decodeFile (blobPath sha) FileMissing FileCorrupt
 
 blobPath :: SHA256 -> Store root -> FilePath
@@ -320,7 +320,7 @@ store ::
   -- | Value to store
   a ->
   -- | Ref to stored value
-  CasperT root m (Ref a)
+  CasperT s root m (Ref s a)
 store a = withFileLock sha . CasperT $ do
   exists <- asks (contentPath sha) >>= liftIO . doesFileExist
   unless exists $ do
@@ -333,7 +333,7 @@ store a = withFileLock sha . CasperT $ do
     sha = hashBS bs
     meta = mkMeta a
 
-withFileLock :: (MonadMask m, MonadIO m) => SHA256 -> CasperT root m a -> CasperT root m a
+withFileLock :: (MonadMask m, MonadIO m) => SHA256 -> CasperT s root m a -> CasperT s root m a
 withFileLock sha run = do
   lockVar <- CasperT (asks contentLocks)
   bracket_ (acquire lockVar) (release lockVar) run
@@ -347,7 +347,7 @@ withFileLock sha run = do
       liftIO . atomically $
         modifyTVar lockVar (S.delete sha)
 
-getRoot :: Monad m => CasperT root m (Loc root)
+getRoot :: Monad m => CasperT s root m (Loc s root)
 getRoot = pure $ Loc UUID.nil
 
 data Store root = Store
@@ -398,7 +398,7 @@ initStore path r = do
         sha = hashBS bytes
 
 -- | Create a new resource initalized with content.
-newResource :: (MonadIO m, MonadMask m, Resource a) => a -> CasperT root m (Loc a)
+newResource :: (MonadIO m, MonadMask m, Resource a) => a -> CasperT s root m (Loc s a)
 newResource x = go
   where
     go = do
@@ -410,7 +410,7 @@ newResource x = go
         else Loc uuid <$ writeResource (Loc uuid) x
 
 -- | Write resource without locking
-unsafeWriteResource :: (Resource a, MonadMask m, MonadIO m) => UUID.UUID -> a -> CasperT root m ()
+unsafeWriteResource :: (Resource a, MonadMask m, MonadIO m) => UUID.UUID -> a -> CasperT s root m ()
 unsafeWriteResource uuid x = do
   s <- CasperT ask
   withFileLock sha . liftIO $ do
@@ -422,7 +422,7 @@ unsafeWriteResource uuid x = do
     sha = hashBS bs
     meta = resourceMeta sha x
 
-unsafeReadResource :: (Resource a, MonadMask m, MonadIO m) => UUID.UUID -> CasperT root m a
+unsafeReadResource :: (Resource a, MonadMask m, MonadIO m) => UUID.UUID -> CasperT s root m a
 unsafeReadResource uuid = do
   ResourceMeta sha _ _ <- getResourceMeta uuid
   decodeResourceFile (blobPath sha) FileMissing FileCorrupt
@@ -431,7 +431,7 @@ unsafeReadResource uuid = do
       decodeFileWith (fmap decodeResource . liftIO . BS.readFile) (liftIO . doesFileExist)
 
 -- | Write a value to a resource
-writeResource :: (Resource a, MonadMask m, MonadIO m) => Loc a -> a -> CasperT root m ()
+writeResource :: (Resource a, MonadMask m, MonadIO m) => Loc s a -> a -> CasperT s root m ()
 writeResource (Loc uuid) x = waitOnBigLock $ withResourceLock uuid $ unsafeWriteResource uuid x
   where
     waitOnBigLock act = do
@@ -442,23 +442,23 @@ writeResource (Loc uuid) x = waitOnBigLock $ withResourceLock uuid $ unsafeWrite
       act
 
 -- | Read the value of a resource at a location
-readResource :: (Resource a, MonadMask m, MonadIO m) => Loc a -> CasperT root m a
+readResource :: (Resource a, MonadMask m, MonadIO m) => Loc s a -> CasperT s root m a
 readResource (Loc uuid) = withResourceLock uuid $ unsafeReadResource uuid
 
 -- | Modify a resource
-modifyResource :: (Resource a, MonadMask m, MonadIO m) => (a -> a) -> Loc a -> CasperT root m ()
+modifyResource :: (Resource a, MonadMask m, MonadIO m) => (a -> a) -> Loc s a -> CasperT s root m ()
 modifyResource f (Loc uuid) = withResourceLock uuid $ do
   x <- unsafeReadResource uuid
   unsafeWriteResource uuid (f x)
 
 -- | Spot the location of a resource in the store given its UUID.
 -- If the resource is not present in the store 'Nothing' is returned.
-spot :: (Resource a, MonadIO m) => UUID.UUID -> CasperT root m (Maybe (Loc a))
+spot :: (Resource a, MonadIO m) => UUID.UUID -> CasperT s root m (Maybe (Loc s a))
 spot uuid = CasperT $ do
   meta <- asks (resourcePath uuid) >>= liftIO . doesFileExist
   if meta then pure (Just (Loc uuid)) else pure Nothing
 
-withResourceLock :: (MonadMask m, MonadIO m) => UUID.UUID -> CasperT root m a -> CasperT root m a
+withResourceLock :: (MonadMask m, MonadIO m) => UUID.UUID -> CasperT s root m a -> CasperT s root m a
 withResourceLock uuid run = do
   lockVar <- CasperT (asks resourceLocks)
   bracket_ (acquire lockVar) (release lockVar) run
@@ -477,7 +477,7 @@ resourceMeta sha a =
   let (locs, refs) = resourceReferences (\(Loc u) -> u) forget a
    in ResourceMeta sha (S.fromList locs) (S.fromList refs)
 
-runCasperT :: (MonadMask m, MonadIO m) => Store root -> CasperT root m a -> m (Either CasperError a)
+runCasperT :: (MonadMask m, MonadIO m) => Store root -> (forall s. CasperT s root m a) -> m (Either CasperError a)
 runCasperT s (CasperT action) = do
   withActiveBlock s $
     runReaderT (runExceptT action) s

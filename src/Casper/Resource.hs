@@ -32,23 +32,23 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics
 import Numeric.Natural (Natural)
 
-newtype Loc a = Loc UUID
+newtype Loc s a = Loc UUID
   deriving (Show, Eq, Ord)
 
-instance Aeson.ToJSONKey (Loc a)
+instance Aeson.ToJSONKey (Loc s a)
 
-instance Aeson.FromJSONKey (Loc a)
+instance Aeson.FromJSONKey (Loc s a)
 
-instance Aeson.ToJSON (Loc a) where
+instance Aeson.ToJSON (Loc s a) where
   toJSON (Loc a) = Aeson.toJSON a
 
-instance Aeson.FromJSON (Loc a) where
+instance Aeson.FromJSON (Loc s a) where
   parseJSON v = Loc <$> Aeson.parseJSON v
 
 class Resource a where
   resourceReferences ::
-    (forall b. Loc b -> loc) ->
-    (forall b. Ref b -> ref) ->
+    (forall s b. Loc s b -> loc) ->
+    (forall s b. Ref s b -> ref) ->
     a ->
     ([loc], [ref])
   encodeResource :: a -> ByteString
@@ -56,8 +56,8 @@ class Resource a where
 
   default resourceReferences ::
     (Generic a, GResource (Rep a)) =>
-    (forall b. Loc b -> loc) ->
-    (forall b. Ref b -> ref) ->
+    (forall s b. Loc s b -> loc) ->
+    (forall s b. Ref s b -> ref) ->
     a ->
     ([loc], [ref])
   resourceReferences f g a = gresourceReferences f g (from a)
@@ -66,9 +66,9 @@ class Resource a where
   default decodeResource :: Aeson.FromJSON a => ByteString -> Either String a
   decodeResource = Aeson.eitherDecodeStrict'
 
-instance Resource (Loc a) where resourceReferences f _ l = ([f l], [])
+instance Resource (Loc s a) where resourceReferences f _ l = ([f l], [])
 
-instance Resource (Ref a) where resourceReferences _ g r = ([], [g r])
+instance Resource (Ref s a) where resourceReferences _ g r = ([], [g r])
 
 instance Resource SHA256 where resourceReferences _ _ = mempty
 
@@ -112,8 +112,8 @@ instance Resource IntSet where resourceReferences _ _ = mempty
 
 class GResource a where
   gresourceReferences ::
-    (forall b. Loc b -> loc) ->
-    (forall b. Ref b -> ref) ->
+    (forall s b. Loc s b -> loc) ->
+    (forall s b. Ref s b -> ref) ->
     a x ->
     ([loc], [ref])
 
@@ -160,7 +160,7 @@ instance (JSONResource a, JSONResource b, JSONResource c) => Resource (a, b, c)
 
 instance (JSONResource a, JSONResource b, JSONResource c, JSONResource d) => Resource (a, b, c, d)
 
-fromFoldable :: (Resource a, Foldable t) => (forall b. Loc b -> loc) -> (forall b. Ref b -> ref) -> t a -> ([loc], [ref])
+fromFoldable :: (Resource a, Foldable t) => (forall s b. Loc s b -> loc) -> (forall s b. Ref s b -> ref) -> t a -> ([loc], [ref])
 fromFoldable f g = foldMap (resourceReferences f g)
 
 instance (JSONResource k, Aeson.FromJSONKey k, Aeson.ToJSONKey k, Ord k, JSONResource e) => Resource (Map k e) where

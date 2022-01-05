@@ -36,13 +36,13 @@ import GHC.Generics
 import Numeric.Natural
 
 class Content a where
-  references :: (forall b. Ref b -> ref) -> a -> [ref]
+  references :: (forall s b. Ref s b -> ref) -> a -> [ref]
   encodeContent :: a -> BS.ByteString
   decodeContent :: BS.ByteString -> Either String a
 
   default references ::
     (Generic a, GContent (Rep a)) =>
-    (forall b. Ref b -> ref) ->
+    (forall s b. Ref s b -> ref) ->
     a ->
     [ref]
   references f a = greferences f (from a)
@@ -63,19 +63,19 @@ instance Read SHA256 where
       Left _ -> []
       Right x -> pure (SHA256 (BShort.toShort x), "")
 
-newtype Ref a = Ref {forget :: SHA256}
+newtype Ref s a = Ref {forget :: SHA256}
   deriving (Eq, Ord)
 
-instance Show (Ref a) where
+instance Show (Ref s a) where
   show (Ref sha) = show sha
 
 -- | A 'Ref' is storable as JSON. You should take care not to use the
 -- 'FromJSON' instance on anything that doesn't come from the Casper store
 -- because those references are not guaranteed to be valid.
-instance Aeson.ToJSON (Ref a) where
+instance Aeson.ToJSON (Ref s a) where
   toJSON (Ref s) = Aeson.toJSON s
 
-instance Aeson.FromJSON (Ref a) where
+instance Aeson.FromJSON (Ref s a) where
   parseJSON v = Ref <$> Aeson.parseJSON v
 
 -- | A 'SHA256' is serialized to a Base64 JSON string with the URL safe
@@ -98,7 +98,7 @@ instance Aeson.FromJSON SHA256 where
       Left err -> fail err
       Right x -> pure (SHA256 (BShort.toShort x))
 
-class GContent a where greferences :: (forall b. Ref b -> ref) -> a x -> [ref]
+class GContent a where greferences :: (forall s b. Ref s b -> ref) -> a x -> [ref]
 
 instance (GContent l, GContent r) => GContent (l :*: r) where
   greferences f (l :*: r) = greferences f l <> greferences f r
@@ -116,13 +116,13 @@ instance (GContent x) => GContent (M1 m i x) where
 instance GContent U1 where
   greferences _ _ = []
 
-fromFoldable :: (Content a, Foldable t) => (forall b. Ref b -> ref) -> t a -> [ref]
+fromFoldable :: (Content a, Foldable t) => (forall s b. Ref s b -> ref) -> t a -> [ref]
 fromFoldable f = foldMap (references f)
 
 instance Content r => GContent (K1 m r) where
   greferences f (K1 r) = references f r
 
-instance Content (Ref a) where references f = pure . f
+instance Content (Ref s a) where references f = pure . f
 
 instance Content SHA256 where references _ = mempty
 
