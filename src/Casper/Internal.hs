@@ -348,10 +348,18 @@ getRoot = pure $ Loc UUID.nil
 
 data Store root = Store
   { storeDir :: FilePath,
+    -- | Lock that GC is currently traversing the directories as part of its
+    -- marking phase, which means we cannot write new things to the store
     gcLock :: TVar Bool,
+    -- | Locks on individual pieces of content, to prevent race conditions when
+    -- writing the same content from two threads
     contentLocks :: TVar (Set SHA256),
+    -- | Prevents modifications to resources while garbage collection is running
     resourceLock :: TVar Bool,
+    -- | Locks on individual resources, to prevent race conditions when writing
+    -- to the same resource from two threads
     resourceLocks :: TVar (Set UUID.UUID),
+    -- | Number of open CasperT transactions, as per `runCasperT`
     activeBlocks :: TVar Natural
   }
 
