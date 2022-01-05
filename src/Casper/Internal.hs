@@ -1,4 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -10,6 +12,7 @@ import Control.Concurrent.STM
 import Control.Monad.Catch
 import Control.Monad.Except
 import Control.Monad.Reader (ReaderT (..), ask, asks)
+import Control.Monad.Writer
 import qualified Crypto.Hash as Crypto
 import Data.Bits
 import qualified Data.ByteArray as ByteArray
@@ -19,7 +22,13 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Short as BShort
 import qualified Data.ByteString.Unsafe as BU
 import Data.Foldable (toList)
+import Data.Functor ((<&>))
+import Data.Functor.Const
+import Data.Functor.Identity
+import Data.Kind
+import Data.Map (Map)
 import Data.Maybe (mapMaybe)
+import Data.Proxy
 import Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.UUID as UUID
@@ -161,14 +170,19 @@ deleteResource uuid = CasperT (asks $ resourcePath uuid) >>= lift . liftIO . rem
 collectGarbage :: (MonadMask m, MonadIO m) => Store s -> m (Either CasperError ())
 collectGarbage s = do
   available' <- bracket_ takeGCLock releaseGCLock $ do
+    -- finish the currently running transactions
     finishActiveBlocks
+    -- collect what's in the store before entering the marking phase
     available s
   lockResources $
     runCasperT s $ do
+      -- mark accessible resources
       (resources, roots, blobs) <- resourceClosure
+      -- mark accessible content
       contentClosure <- closure roots
       let notGarbage = S.union contentClosure blobs
       let (resources', objects', blobs') = available'
+      -- sweep inaccessible resources, content and blobs
       forM_ (S.toList $ resources' S.\\ resources) deleteResource
       forM_ (S.toList $ blobs' S.\\ notGarbage) deleteBlob
       forM_ (S.toList $ objects' S.\\ contentClosure) deleteObject
@@ -346,16 +360,23 @@ withFileLock sha run = do
 getRoot :: Monad m => CasperT root m (Loc root)
 getRoot = pure $ Loc UUID.nil
 
+data GCState
+  = Idle
+  | -- | Waiting for all transactions to end and start GC. During this phase, no new transactions may be started
+    Waiting
+  | -- | During marking, all writes to resources are illegal (content cannot be modified)
+    Marking
+  | -- | During sweeping, writes to resources are illegal
+    Sweeping
+
 data Store root = Store
   { storeDir :: FilePath,
     -- | Lock that GC is currently traversing the directories as part of its
     -- marking phase, which means we cannot write new things to the store
-    gcLock :: TVar Bool,
+    gcState :: TVar GCState,
     -- | Locks on individual pieces of content, to prevent race conditions when
     -- writing the same content from two threads
     contentLocks :: TVar (Set SHA256),
-    -- | Prevents modifications to resources while garbage collection is running
-    resourceLock :: TVar Bool,
     -- | Locks on individual resources, to prevent race conditions when writing
     -- to the same resource from two threads
     resourceLocks :: TVar (Set UUID.UUID),
@@ -466,18 +487,109 @@ resourceMeta sha a =
   let (locs, refs) = resourceReferences (\(Loc u) -> u) forget a
    in ResourceMeta sha (S.fromList locs) (S.fromList refs)
 
-runCasperT :: (MonadMask m, MonadIO m) => Store root -> CasperT root m a -> m (Either CasperError a)
+runCasperT ::
+  (MonadMask m, MonadIO m) =>
+  Store root ->
+  CasperT root m a ->
+  m (Either CasperError a)
 runCasperT s (CasperT action) = do
   withActiveBlock s $
     runReaderT (runExceptT action) s
 
-withActiveBlock :: (MonadMask m, MonadIO m) => Store root -> m a -> m a
-withActiveBlock s = bracket_ acquire release
-  where
-    acquire =
-      liftIO . atomically $ do
-        locked <- readTVar $ gcLock s
-        when locked retry
-        modifyTVar (activeBlocks s) succ
-    release =
-      liftIO $ atomically $ modifyTVar (activeBlocks s) pred
+{-
+   {
+   ref <- store a
+   -- gc
+   read ref
+   }
+   -- gc happens
+-}
+
+{-
+ let u404 = uuidOfInnaccessible resource
+ -- gc started
+ {
+   rootLoc <- getRoot
+   loc404 <- get u404 -- Nothing
+   write rootLoc loc404
+ }
+
+-}
+
+data Addr a
+
+data CasperM s root a
+
+data Person rec val = Person
+  { age :: val Int,
+    pets :: rec (Comp [] Pet rec val)
+  }
+
+newtype Comp f g rec val = Comp (f (g rec val))
+
+data Pet rec val = Pet
+  { petAge :: val Int
+  }
+
+newtype Descriptor s
+  = Descriptor
+      ( forall m rec val.
+        Applicative m =>
+        ( forall a.
+          RecField s a ->
+          Descriptor a ->
+          String ->
+          m (rec (a rec val))
+        ) ->
+        ( forall a.
+          Field s a ->
+          String ->
+          a ->
+          m (val a)
+        ) ->
+        m (s rec val)
+      )
+
+personDesc :: Descriptor Person
+personDesc = Descriptor $ \recField field ->
+  Person
+    <$> field age "field" 2
+    <*> recField pets _ "pets"
+
+-- pureDesc :: Applicative m => Descriptor a -> Descriptor (Comp m a)
+-- pureDesc (Descriptor desc) =
+
+listDesc :: Descriptor a -> Descriptor (Comp [] a)
+listDesc (Descriptor desc) = Descriptor $ \recField field ->
+  pure $ Comp []
+
+petDesc :: Descriptor Pet
+petDesc = Descriptor $ \_ field -> Pet <$> field petAge "pet age" 1
+
+defaultT :: Descriptor a -> a Identity Identity
+defaultT (Descriptor desc) =
+  runIdentity $
+    desc
+      (\_ nested _ -> pure $ Identity $ defaultT nested)
+      (\_ _ a -> pure $ Identity a)
+
+type RecField s a = forall f q. s f q -> f (a f q)
+
+type Field s a = forall f q. s q f -> f a
+
+age' :: Field Person Int
+age' = age
+
+petAge' :: Field Pet Int
+petAge' = petAge
+
+-- withActiveBlock :: (MonadMask m, MonadIO m) => Store root -> m a -> m a
+-- withActiveBlock s = bracket_ acquire release
+--   where
+--     acquire =
+--       liftIO . atomically $ do
+--         locked <- readTVar $ gcLock s
+--         when locked retry
+--         modifyTVar (activeBlocks s) succ
+--     release =
+--       liftIO $ atomically $ modifyTVar (activeBlocks s) pred
