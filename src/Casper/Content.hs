@@ -31,6 +31,7 @@ import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.String (fromString)
 import Data.Tree (Tree)
+import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics
 import Numeric.Natural
@@ -161,6 +162,8 @@ instance Content Word32 where references _ = mempty
 instance Content Word64 where references _ = mempty
 
 instance Content () where references _ = mempty
+
+instance Content Void where references _ = mempty
 
 instance Content IntSet where references _ = mempty
 

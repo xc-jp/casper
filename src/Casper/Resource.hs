@@ -28,6 +28,7 @@ import Data.Sequence (Seq)
 import Data.Set (Set)
 import Data.Tree (Tree)
 import Data.UUID (UUID)
+import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics
 import Numeric.Natural (Natural)
@@ -107,6 +108,8 @@ instance Resource Word32 where resourceReferences _ _ = mempty
 instance Resource Word64 where resourceReferences _ _ = mempty
 
 instance Resource () where resourceReferences _ _ = mempty
+
+instance Resource Void where resourceReferences _ _ = mempty
 
 instance Resource IntSet where resourceReferences _ _ = mempty
 
