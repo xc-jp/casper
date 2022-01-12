@@ -33,7 +33,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics
 import Numeric.Natural (Natural)
 
-newtype Loc s a = Loc UUID
+newtype Loc s a = Loc {forgetLocation :: UUID}
   deriving (Show, Eq, Ord)
 
 instance Aeson.ToJSONKey (Loc s a)

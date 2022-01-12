@@ -23,6 +23,7 @@ module Casper
     -- * Resources
     Loc,
     Resource (..),
+    forgetLocation,
     newResource,
     readResource,
     writeResource,
