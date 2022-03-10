@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -25,6 +27,7 @@ import qualified Data.Set as S
 import qualified Data.UUID as UUID
 import qualified Data.UUID.V4 as U4
 import Data.Word (Word64)
+import GHC.Generics
 import Numeric.Natural
 import System.Directory
   ( createDirectory,
@@ -295,8 +298,14 @@ getResourceMeta uuid = CasperT $ do
 
 -- | Recall the reference for a SHA256 hash in the store.
 -- If the content is not present in the store 'Nothing' is returned.
-recall :: (Content a, MonadIO m) => SHA256 -> CasperT s root m (Maybe (Ref s a))
+recall :: MonadIO m => SHA256 -> CasperT s root m (Maybe (Ref s a))
 recall sha = CasperT $ do
+  content <- asks (blobPath sha) >>= liftIO . doesFileExist
+  meta <- asks (contentPath sha) >>= liftIO . doesFileExist
+  if content && meta then pure (Just (Ref sha)) else pure Nothing
+
+recallRecursive :: MonadIO m => Ref' (f Ref') -> CasperT s root m (Maybe (Ref s (f (Ref s))))
+recallRecursive (Ref' sha) = CasperT $ do
   content <- asks (blobPath sha) >>= liftIO . doesFileExist
   meta <- asks (contentPath sha) >>= liftIO . doesFileExist
   if content && meta then pure (Just (Ref sha)) else pure Nothing
@@ -492,3 +501,79 @@ withActiveBlock s = bracket_ acquire release
         modifyTVar (activeBlocks s) succ
     release =
       liftIO $ atomically $ modifyTVar (activeBlocks s) pred
+
+newtype Ref' a = Ref' {getRef' :: SHA256}
+
+newtype MaybeT m a = MaybeT {unMaybeT :: m (Maybe a)}
+
+instance Functor m => Functor (MaybeT m) where
+  fmap f (MaybeT x) = MaybeT $ fmap (fmap f) x
+
+instance Applicative m => Applicative (MaybeT m) where
+  pure x = MaybeT $ pure (pure x)
+  MaybeT fs <*> MaybeT as = MaybeT ((<*>) <$> fs <*> as)
+
+class Recall f where
+  recalling ::
+    Applicative m =>
+    (forall g. ref (g ref) -> m (ref' (g ref'))) ->
+    (forall a. ref a -> m (ref' a)) ->
+    (f ref -> m (f ref'))
+
+recallCasper :: (Recall f, MonadIO m) => f Ref' -> CasperT s root m (Maybe (f (Ref s)))
+recallCasper = unMaybeT . recalling (MaybeT . recallRecursive) (MaybeT . recall . getRef')
+
+----- DELETE EVERYTHING BELOW THIS LINE -----
+
+newtype Datapoint ref = Datapoint (ref BS.ByteString)
+  deriving (Generic)
+
+data Datapair ref = Datapair (ref (Datapoint ref)) (ref Bool)
+
+newtype Dataclass ref = Dataclass [Datapoint ref]
+
+instance Recall Dataclass where
+  recalling g f (Dataclass points) = Dataclass <$> traverse (recalling g f) points
+
+newtype Dataset ref = Dataset (ref (Dataclass ref))
+
+instance Recall Dataset where
+  recalling inner _ (Dataset d) = Dataset <$> inner d
+
+instance Recall Datapoint where
+  recalling _ g (Datapoint d) = Datapoint <$> g d
+
+instance Recall Datapair where
+  recalling f g (Datapair a b) = Datapair <$> f a <*> g b
+
+newtype Root ref = Root (Datapair ref)
+
+instance Recall Root where
+  recalling f g (Root p) = Root <$> recalling f g p
+
+{-
+instance Content' (Datapair rec f) (Datapair rec g) f g where
+  refs f (Datapair p b) = Datapair <$> f p <*> f b
+
+instance Content' (Root rec f) (Root rec g) f g where
+  refs f (Root p) = Root <$> f p
+  -}
+
+recallDatapair :: MonadIO m => Datapair Ref' -> MaybeT (CasperT s root m) (Datapair (Ref s))
+recallDatapair = recalling (MaybeT . recallRecursive) (MaybeT . recall . getRef')
+
+{-
+recallDatapair :: Datapair Ref' Ref' -> M s (Datapair Ref' (Ref s))
+recallDatapair = refs recall
+
+recallRoot :: Root Ref' Ref' -> M s (Root Ref' (Ref s))
+recallRoot = refs recall
+
+fetchDatapair :: Root Ref' (Ref s) -> M s (Datapair Ref' (Ref s))
+fetchDatapair (Root dp) = retrieve dp >>= refs recall
+-}
+
+{-
+instance Content' (Datapoint f) (Datapoint g) (f BS.ByteString) (g BS.ByteString) where
+  refs f (Datapoint ref) = Datapoint <$> f ref
+  -}

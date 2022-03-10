@@ -1,10 +1,18 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Casper.Content
   ( SHA256 (..),
@@ -12,15 +20,19 @@ module Casper.Content
     Content (..),
     GContent (..),
     JSONContent,
+    TraversableContent (..),
+    GTraversableContent (..),
   )
 where
 
+import Control.Applicative (liftA2)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Char8 as BChar
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Short as BShort
+import Data.Coerce (coerce)
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap (IntMap)
 import Data.IntSet (IntSet)
@@ -37,7 +49,7 @@ import GHC.Generics
 import Numeric.Natural
 
 class Content a where
-  references :: (forall s b. Ref s b -> ref) -> a -> [ref]
+  references :: (forall s r. Ref s r -> ref) -> a -> [ref]
   encodeContent :: a -> BS.ByteString
   decodeContent :: BS.ByteString -> Either String a
 
@@ -64,7 +76,7 @@ instance Read SHA256 where
       Left _ -> []
       Right x -> pure (SHA256 (BShort.toShort x), "")
 
-newtype Ref s a = Ref {forget :: SHA256}
+newtype Ref (s :: *) (a :: *) = Ref {forget :: SHA256}
   deriving (Eq, Ord)
 
 instance Show (Ref s a) where
@@ -76,8 +88,15 @@ instance Show (Ref s a) where
 instance Aeson.ToJSON (Ref s a) where
   toJSON (Ref s) = Aeson.toJSON s
 
+instance Aeson.ToJSON1 (Ref s) where
+  liftToJSON _ _ = Aeson.toJSON . forget
+  liftToEncoding _ _ = Aeson.toEncoding . forget
+
 instance Aeson.FromJSON (Ref s a) where
   parseJSON v = Ref <$> Aeson.parseJSON v
+
+instance Aeson.FromJSON1 (Ref s) where
+  liftParseJSON _ _ = fmap Ref . Aeson.parseJSON
 
 -- | A 'SHA256' is serialized to a Base64 JSON string with the URL safe
 -- alphabet https://tools.ietf.org/rfc/rfc4648#section-5.
@@ -123,7 +142,7 @@ fromFoldable f = foldMap (references f)
 instance Content r => GContent (K1 m r) where
   greferences f (K1 r) = references f r
 
-instance Content (Ref s a) where references f = pure . f
+instance Content (Ref s a) where references f x = pure (f x)
 
 instance Content SHA256 where references _ = mempty
 
@@ -215,3 +234,88 @@ instance JSONContent e => Content (Seq e) where references = fromFoldable
 instance (Ord a, JSONContent a) => Content (Set a) where references = fromFoldable
 
 instance JSONContent e => Content (Tree e) where references = fromFoldable
+
+type HTraversal t f g =
+  forall m.
+  Applicative m =>
+  ( forall a b.
+    f a ->
+    m (g b)
+  ) ->
+  t f ->
+  m (t g)
+
+class TraversableContent t f g where
+  traverseRefs ::
+    Applicative m =>
+    ( forall a b.
+      (Content a, Content b) =>
+      f a ->
+      m (g b)
+    ) ->
+    t f ->
+    m (t g)
+  default traverseRefs ::
+    (forall h. Generic (t h), GTraversableContent (Rep (t f)) (Rep (t g)) f g) =>
+    Applicative m =>
+    ( forall a b.
+      (Content a, Content b) =>
+      f a ->
+      m (g b)
+    ) ->
+    t f ->
+    m (t g)
+  traverseRefs f ts = to <$> gtraverseRefs f (from ts)
+
+class GTraversableContent r r' f g where
+  gtraverseRefs ::
+    Applicative m =>
+    ( forall a b.
+      (Content a, Content b) =>
+      f a ->
+      m (g b)
+    ) ->
+    r x ->
+    m (r' x)
+
+instance (GTraversableContent l l' f g, GTraversableContent r r' f g) => GTraversableContent (l :*: r) (l' :*: r') f g where
+  gtraverseRefs f (l :*: r) = liftA2 (:*:) (gtraverseRefs f l) (gtraverseRefs f r)
+
+instance (GTraversableContent l l' f g, GTraversableContent r r' f g) => GTraversableContent (l :+: r) (l' :+: r') f g where
+  gtraverseRefs f (L1 l) = L1 <$> gtraverseRefs f l
+  gtraverseRefs f (R1 r) = R1 <$> gtraverseRefs f r
+
+instance GTraversableContent V1 V1 f g where
+  gtraverseRefs _ x = case x of {}
+
+instance (GTraversableContent x x' f g) => GTraversableContent (M1 m i x) (M1 m i x') f g where
+  gtraverseRefs f (M1 x) = M1 <$> gtraverseRefs f x
+
+instance GTraversableContent U1 U1 f g where
+  gtraverseRefs _ U1 = pure U1
+
+{-
+instance (TraversableContent x) => GTraversableContent (K1 i (f (x f))) (K1 i (g (x g))) f g where
+  gtraverseRefs f (K1 x) = K1 <$> f x
+-}
+
+{-
+instance GTraversableContent (K1 i (f x)) (K1 i (g x')) f g where
+  gtraverseRefs f (K1 x) = K1 <$> f x
+  -}
+
+{-
+instance Content (Datapoint (Ref s)) where
+  references f (Datapoint r) = [f r]
+  encodeContent = undefined
+  decodeContent = undefined
+  -}
+
+-- instance TraversableContent Datapoint f g
+
+-- Dataset Ref' -> Dataset (Ref s)
+
+-- Ref s [Datapoint (Ref s)] -> Ref' [Datapoint Ref']
+
+-- instance TraversableContent Dataset f g where
+--   traverseRefs f (Dataset refs) = Dataset <$> f refs

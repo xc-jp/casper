@@ -41,10 +41,17 @@ instance Aeson.ToJSONKey (Loc s a)
 instance Aeson.FromJSONKey (Loc s a)
 
 instance Aeson.ToJSON (Loc s a) where
-  toJSON (Loc a) = Aeson.toJSON a
+  toJSON (Loc s) = Aeson.toJSON s
+
+instance Aeson.ToJSON1 (Loc s) where
+  liftToJSON _ _ = Aeson.toJSON . forgetLocation
+  liftToEncoding _ _ = Aeson.toEncoding . forgetLocation
 
 instance Aeson.FromJSON (Loc s a) where
   parseJSON v = Loc <$> Aeson.parseJSON v
+
+instance Aeson.FromJSON1 (Loc s) where
+  liftParseJSON _ _ = fmap Loc . Aeson.parseJSON
 
 class Resource a where
   resourceReferences ::
