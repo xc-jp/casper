@@ -1,3 +1,17 @@
+{-
+
+TODOs
+
+CasperT should maintain a cache of UUIDs/hashes to TVars of cachable things
+
+Transactions should be able to safely populate and read from the cache
+
+There should be a way to evict things from the cache that are not used by any transaction
+  Note that a transaction could load something into the cache, be retried, and on the second run not use the thing that it loaded into the cache on the first run
+
+Garbage collection
+
+-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -12,6 +26,7 @@
 module Lib where
 
 import Control.Monad
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Identity (Identity)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
@@ -19,8 +34,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BL
 import Data.Kind (Type)
 import GHC.Generics
-
-data Graph root = Graph
 
 newtype Transaction (mut :: Type -> Type) (imm :: Type -> Type) a = Transaction (Identity a)
   deriving (Functor, Monad, Applicative)
@@ -61,12 +74,17 @@ deriving via (WrapAeson mut imm Int) instance Content mut imm Int
 newtype WrapCereal mut imm a = WrapCereal {unWrapCereal :: a}
 
 newtype CasperT s root m a = CasperT (m a)
-  deriving (Functor, Monad, Applicative)
+  deriving (Functor, Monad, Applicative, MonadIO)
 
 loadStore :: FilePath -> (forall s. CasperT s root m a) -> m a
 loadStore _ _ = undefined
 
-transact :: (forall mut imm. root mut imm -> Transaction mut imm a) -> CasperT s root IO a
+transact ::
+  ( forall mut imm.
+    root mut imm ->
+    Transaction mut imm a
+  ) ->
+  CasperT s root IO a
 transact _ = undefined
 
 localRoot ::
