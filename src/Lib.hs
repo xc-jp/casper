@@ -26,6 +26,8 @@ module Lib
     liftSTM,
     Transaction,
     CasperT,
+    UUID (..),
+    SHA (..),
   )
 where
 

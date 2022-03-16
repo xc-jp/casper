@@ -9,7 +9,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Content (Content (..)) where
+module Content (Refs (..), Content (..), WrapAeson (..)) where
 
 import Data.Aeson (ToJSON)
 import qualified Data.Aeson as Aeson
@@ -18,8 +18,15 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BL
 import Data.Kind (Type)
 import GHC.Generics
+  ( Generic (Rep, from),
+    K1 (K1),
+    M1 (M1),
+    U1,
+    type (:*:) (..),
+    type (:+:) (..),
+  )
 
-class Refs (mut :: Type -> Type) imm a where
+class Refs (mut :: Type -> Type) (imm :: Type -> Type) a where
   refs ::
     (forall r. mut r -> ref) ->
     (forall r. imm r -> ref) ->
@@ -45,45 +52,52 @@ class Refs mut imm a => Content mut imm a where
 
 newtype WrapAeson (mut :: Type -> Type) (imm :: Type -> Type) a = WrapAeson {unWrapAeson :: a}
 
+instance (Refs mut imm a) => Refs mut imm (WrapAeson mut imm a) where
+  refs fm fi (WrapAeson a) = refs fm fi a
+
 instance
-  (ToJSON a, FromJSON a, Generic a, GMutableContent mut imm (Rep a)) =>
+  (ToJSON a, FromJSON a, Refs mut imm a) =>
   Content mut imm (WrapAeson mut imm a)
   where
-  refs fm fi (WrapAeson a) = grefs fm fi (from a)
   encode _ _ = BL.toStrict . Aeson.encode . unWrapAeson
   decode _ _ = fmap WrapAeson . Aeson.eitherDecodeStrict'
 
+instance Refs mut imm Int where
+  refs _ _ _ = []
+
 deriving via (WrapAeson mut imm Int) instance Content mut imm Int
 
-newtype WrapCereal mut imm a = WrapCereal {unWrapCereal :: a}
+instance Refs mut imm (mut a) where
+  refs fm _ m = [fm m]
 
 instance Content mut imm (mut a) where
-  refs fm _ m = [fm m]
   encode fm _ = fm
   decode fm _ = fm
 
-instance Content mut imm (imm a) where
+instance Refs mut imm (imm a) where
   refs _ fi m = [fi m]
+
+instance Content mut imm (imm a) where
   encode _ fi = fi
   decode _ fi = fi
 
-class GMutableContent mut imm a where
+class GRefs mut imm a where
   grefs :: (forall r. mut r -> ref) -> (forall r. imm r -> ref) -> a x -> [ref]
 
-instance GMutableContent mut imm U1 where
+instance GRefs mut imm U1 where
   grefs _ _ _ = []
 
-instance Content mut imm a => GMutableContent mut imm (K1 m a) where
+instance Refs mut imm a => GRefs mut imm (K1 m a) where
   grefs fm fi (K1 a) = refs fm fi a
 
-instance GMutableContent mut imm f => GMutableContent mut imm (M1 i c f) where
+instance GRefs mut imm f => GRefs mut imm (M1 i c f) where
   grefs fm fi (M1 a) = grefs fm fi a
 
-instance (GMutableContent mut imm f, GMutableContent mut imm g) => GMutableContent mut imm (f :*: g) where
+instance (GRefs mut imm f, GRefs mut imm g) => GRefs mut imm (f :*: g) where
   grefs fm fi (l :*: r) = grefs fm fi l <> grefs fm fi r
 
-instance (GMutableContent mut imm f, GMutableContent mut imm g) => GMutableContent mut imm (f :+: g) where
+instance (GRefs mut imm f, GRefs mut imm g) => GRefs mut imm (f :+: g) where
   grefs fm fi (L1 l) = grefs fm fi l
   grefs fm fi (R1 r) = grefs fm fi r
 
-instance Content mut imm a => Content mut imm [a]
+instance Refs mut imm a => Refs mut imm [a]
