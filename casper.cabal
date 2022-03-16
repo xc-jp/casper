@@ -14,6 +14,9 @@ extra-source-files: README.md
 
 library
   exposed-modules:
+    Content
+    DMap
+    LargeWords
     Lib
     Use
 
@@ -22,19 +25,22 @@ library
   ghc-options:      -Wall
   build-depends:
       aeson
-    , base               >=4.7     && <5
-    , base16-bytestring  >=1.0.0.0
-    , base64-bytestring  >=1.1.0.0
+    , base                  >=4.7     && <5
+    , base16-bytestring     >=1.0.0.0
+    , base64-bytestring     >=1.1.0.0
     , bytestring
     , containers
     , cryptonite
     , directory
     , exceptions
     , filepath
+    , hashable
     , memory
     , mtl
     , process
+    , resourcet
     , stm
+    , unordered-containers
 
 test-suite casper-spec
   type:             exitcode-stdio-1.0
