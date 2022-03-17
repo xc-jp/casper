@@ -9,13 +9,17 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Content (Refs (..), Content (..), WrapAeson (..)) where
+module Content (Refs (..), TraverseRefs (..), Content (..), WrapAeson (..)) where
 
+import Control.Monad.Identity (Identity (runIdentity))
+import Control.Monad.Writer (MonadWriter (tell), execWriter)
 import Data.Aeson (ToJSON)
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (FromJSON)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BL
+import Data.Data (Proxy (Proxy))
+import Data.Functor.Const (Const (Const))
 import Data.Kind (Type)
 import GHC.Generics
   ( Generic (Rep, from),
@@ -39,6 +43,26 @@ class Refs (mut :: Type -> Type) (imm :: Type -> Type) a where
     [ref]
   refs fm fi a = grefs fm fi (from a)
 
+instance TraverseRefs f => Refs mut imm (f mut imm) where
+  refs as bs f =
+    execWriter $
+      traverseRefs
+        (\_ -> Proxy <$ pure ())
+        (\_ -> Proxy <$ pure ())
+        (\m -> Proxy <$ tell [as m])
+        (\i -> Proxy <$ tell [bs i])
+        f
+
+class TraverseRefs f where
+  traverseRefs ::
+    Applicative m =>
+    (forall a b. mut' a -> m (mut' b)) -> -- cast mutable ref
+    (forall a b. imm' a -> m (imm' b)) -> -- cast immutable ref
+    (forall r. mut r -> m (mut' r)) ->
+    (forall r. imm r -> m (imm' r)) ->
+    f mut imm ->
+    m (f mut' imm')
+
 class Refs mut imm a => Content mut imm a where
   encode ::
     (forall r. mut r -> ByteString) ->
@@ -46,6 +70,8 @@ class Refs mut imm a => Content mut imm a where
     (a -> ByteString)
 
   decode ::
+    (forall x y. mut x -> Either String (mut y)) ->
+    (forall x y. imm x -> Either String (imm y)) ->
     (forall r. ByteString -> Either String (mut r)) ->
     (forall r. ByteString -> Either String (imm r)) ->
     (ByteString -> Either String a)
@@ -55,12 +81,36 @@ newtype WrapAeson (mut :: Type -> Type) (imm :: Type -> Type) a = WrapAeson {unW
 instance (Refs mut imm a) => Refs mut imm (WrapAeson mut imm a) where
   refs fm fi (WrapAeson a) = refs fm fi a
 
+castConst :: Const x a -> Const x b
+castConst (Const x) = Const x
+
 instance
-  (ToJSON a, FromJSON a, Refs mut imm a) =>
+  ( ToJSON (f (Const ByteString) (Const ByteString)),
+    FromJSON (f (Const ByteString) (Const ByteString)),
+    TraverseRefs f
+  ) =>
+  Content mut imm (WrapAeson mut imm (f mut imm))
+  where
+  encode fm fi =
+    BL.toStrict . Aeson.encode
+      . runIdentity
+      . traverseRefs (pure . castConst) (pure . castConst) (pure . Const . fm) (pure . Const . fi)
+      . unWrapAeson
+  decode castMut castImm fm fi v = do
+    f <- Aeson.eitherDecodeStrict' v
+    let parseMut (Const m) = fm m
+    let parseImm (Const i) = fi i
+    WrapAeson <$> traverseRefs castMut castImm parseMut parseImm f
+
+instance
+  ( ToJSON a,
+    FromJSON a,
+    Refs mut imm a
+  ) =>
   Content mut imm (WrapAeson mut imm a)
   where
   encode _ _ = BL.toStrict . Aeson.encode . unWrapAeson
-  decode _ _ = fmap WrapAeson . Aeson.eitherDecodeStrict'
+  decode _ _ _ _ v = WrapAeson <$> Aeson.eitherDecodeStrict' v
 
 instance Refs mut imm Int where
   refs _ _ _ = []
@@ -72,14 +122,14 @@ instance Refs mut imm (mut a) where
 
 instance Content mut imm (mut a) where
   encode fm _ = fm
-  decode fm _ = fm
+  decode _ _ fm _ = fm
 
 instance Refs mut imm (imm a) where
   refs _ fi m = [fi m]
 
 instance Content mut imm (imm a) where
   encode _ fi = fi
-  decode _ fi = fi
+  decode _ _ _ fi = fi
 
 class GRefs mut imm a where
   grefs :: (forall r. mut r -> ref) -> (forall r. imm r -> ref) -> a x -> [ref]
