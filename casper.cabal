@@ -16,6 +16,7 @@ library
   exposed-modules:
     Content
     DMap
+    HTraversable
     LargeWords
     Lib
     Use
