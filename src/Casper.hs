@@ -119,8 +119,6 @@ instance Serialize (Var s a) where
   put (Var key) = Serialize.put $ unDKey key
   get = Var . unsafeMkDKey <$> Serialize.get
 
--- put (Var (Word128 a b)) = UUID.toStrict
-
 instance FromJSON (Var s a) where
   parseJSON v = do
     txt <- Aeson.parseJSON v
@@ -204,8 +202,6 @@ keepAlive = undefined
 -- TODO Make atomic write/move pairs
 newtype TransactionCommits = TransactionCommits {onCommit :: IO ()}
 
--- newtype Datasets mut imm = Datasets (Map UUID (mut (Dataset mut imm)))
-
 data TransactionContext = TransactionContext
   { txResourceLocks :: TVar (HashSet UUID),
     txContentLocks :: TVar (HashSet SHA),
@@ -233,7 +229,6 @@ liftSTM = Transaction . lift . lift
 transact ::
   forall root q a.
   (forall s. Serialize (root s)) =>
-  -- TODO hide Var and Ref in this constraint
   (forall s. root s -> Transaction s a) ->
   CasperT q root IO a
 transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
