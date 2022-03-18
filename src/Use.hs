@@ -9,24 +9,24 @@
 
 module Use where
 
+import Casper
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson
 import Data.Kind (Type)
 import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
-import Lib
 
-data Root s = Root (RRef s (Foo s)) (RRef s (Foo s))
+data Root s = Root (Var s (Foo s)) (Var s (Foo s))
   deriving stock (Generic)
   deriving anyclass (FromJSON, ToJSON)
   deriving (Serialize) via WrapAeson (Root s)
 
 data Foo s = Foo
-  { mi :: RRef s Int,
-    mli :: RRef s [Int],
-    lmi :: [RRef s Int],
-    rec :: RRef s (Foo s),
-    recs :: RRef s [Foo s],
+  { mi :: Var s Int,
+    mli :: Var s [Int],
+    lmi :: [Var s Int],
+    rec :: Var s (Foo s),
+    recs :: Var s [Foo s],
     val :: Int
   }
   deriving stock (Generic)
@@ -34,6 +34,12 @@ data Foo s = Foo
   deriving (Serialize) via WrapAeson (Foo s)
 
 deriving instance Content s (Foo s)
+
+-- >>> import qualified Data.Aeson as Aeson
+-- >>> Aeson.encode exampleFoo
+-- "{\"mi\":\"00000000-0000-0000-0000-000000000000\",\"val\":2,\"mli\":\"00000000-0000-0000-0000-000000000000\",\"recs\":\"00000000-0000-0000-0000-000000000000\",\"rec\":\"00000000-0000-0000-0000-000000000000\",\"lmi\":[\"00000000-0000-0000-0000-000000000000\",\"00000000-0000-0000-0000-000000000000\"]}"
+exampleFoo :: Foo s
+exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 
 -- data Dataset i = Dataset ([i (Datapoint i)])
 --   deriving (Generic)
@@ -73,14 +79,14 @@ deriving instance Content s (Foo s)
 
 -- instance Content mut imm (Foo mut imm)
 
-someFunc :: IO ()
+someFunc :: IO Int
 someFunc =
   loadStore "/dev/null" $ do
-    transact $ \(Root l r) -> do
-      foo1 <- readMut l
-      foo2 <- readMut (rec foo1)
-      readMut (mi foo1)
-    -- localRoot (\(Root l r) -> rec <$> readMut l) $ do
-    --   liftIO $ putStrLn "Changed root"
-    --   pure ()
-    pure ()
+    transact $ \(Root l _) -> do
+      foo1 <- readVar l
+      foo2 <- readVar (rec foo1)
+      readVar (mi foo2)
+
+-- localRoot (\(Root l r) -> rec <$> readMut l) $ do
+--   liftIO $ putStrLn "Changed root"
+--   pure ()

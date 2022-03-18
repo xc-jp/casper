@@ -16,24 +16,23 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
--- TODO
---   Var
---   Ref
-
-module Lib
+module Casper
   ( transact,
-    -- localRoot,
-    readMut,
-    writeMut,
-    newMut,
+    readVar,
+    writeVar,
+    newVar,
+    readRef,
+    newRef,
     loadStore,
     liftSTM,
     WrapAeson (..),
     Content (..),
     Transaction,
     CasperT,
-    RRef,
-    CRef,
+    Var,
+    fakeVar,
+    Ref,
+    fakeRef,
   )
 where
 
@@ -50,6 +49,7 @@ import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base64.URL as Base64
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
@@ -58,42 +58,90 @@ import Data.Hashable (Hashable)
 import Data.Kind (Type)
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
+import qualified Data.Text.Encoding as Text
 import Data.Typeable
+import qualified Data.UUID as UUID
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
-import LargeWords
+import LargeWords (Word128 (..), Word256 (..))
 
 newtype TransactionID = TransactionID Word
 
 newtype UUID = UUID Word128
   deriving newtype (Eq, Hashable)
 
+instance Serialize UUID where
+  put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
+  get = UUID <$> (Word128 <$> Serialize.get <*> Serialize.get)
+
 newtype SHA = SHA Word256
   deriving newtype (Eq, Hashable)
 
-newtype CRef s a = CRef (DKey SHA a)
+newtype Ref s a = Ref (DKey SHA a)
 
-instance FromJSON (CRef s a) where parseJSON = undefined
+fakeRef :: Ref s a
+fakeRef = Ref $ unsafeMkDKey $ SHA (Word256 0 0 0 0)
 
-instance ToJSON (CRef s a) where toJSON = undefined
+instance Serialize SHA where
+  get = SHA <$> (Word256 <$> Serialize.get <*> Serialize.get <*> Serialize.get <*> Serialize.get)
+  put (SHA (Word256 a b c d)) = Serialize.put a <> Serialize.put b <> Serialize.put c <> Serialize.put d
 
-instance Serialize (CRef s a) where
-  get = undefined
-  put = undefined
+instance ToJSON (Ref s a) where
+  toJSON ref =
+    Aeson.String $
+      Text.decodeLatin1 $
+        Base64.encode $
+          Serialize.runPut $
+            Serialize.put ref
 
-instance Content s (CRef s a) where refs _ fc c = pure $ fc c
+instance FromJSON (Ref s a) where
+  parseJSON v = do
+    txt <- Aeson.parseJSON v
+    let digest = Text.encodeUtf8 txt
+    case Base64.decode digest of
+      Left err -> fail err
+      Right bytes -> case Serialize.runGet Serialize.get bytes of
+        Left err -> fail err
+        Right x -> pure x
 
-newtype RRef s a = RRef {unResourceRef :: DKey UUID (TVar a)}
+instance Serialize (Ref s a) where
+  get = Ref . unsafeMkDKey <$> Serialize.get
+  put (Ref key) = Serialize.put $ unDKey key
 
-instance Serialize (RRef s a) where
-  get = undefined
-  put = undefined
+instance Content s (Ref s a) where refs _ fc c = pure $ fc c
 
-instance FromJSON (RRef s a) where parseJSON = undefined
+newtype Var s a = Var {unResourceRef :: DKey UUID (TVar a)}
 
-instance ToJSON (RRef s a) where toJSON = undefined
+fakeVar :: Var s a
+fakeVar = Var $ unsafeMkDKey $ UUID $ Word128 0 0
 
-instance Content s (RRef s a) where refs fr _ r = pure $ fr r
+instance Serialize (Var s a) where
+  put (Var key) = Serialize.put $ unDKey key
+  get = Var . unsafeMkDKey <$> Serialize.get
+
+-- put (Var (Word128 a b)) = UUID.toStrict
+
+instance FromJSON (Var s a) where
+  parseJSON v = do
+    txt <- Aeson.parseJSON v
+    case UUID.fromText txt of
+      Nothing -> fail (show txt <> " isn't a valid UUID")
+      Just a -> pure $ Var $ unsafeMkDKey $ UUID (fromUUID a)
+
+toUUID :: Word128 -> UUID.UUID
+toUUID (Word128 a b) = UUID.fromWords64 a b
+
+fromUUID :: UUID.UUID -> Word128
+fromUUID u = Word128 a b
+  where
+    (a, b) = UUID.toWords64 u
+
+instance ToJSON (Var s a) where
+  toJSON (Var key) =
+    let UUID w = unDKey key
+     in Aeson.String (UUID.toText (toUUID w))
+
+instance Content s (Var s a) where refs fr _ r = pure $ fr r
 
 instance Content s a => Content s [a]
 
@@ -101,20 +149,20 @@ instance Content s Int where refs _ _ _ = []
 
 class Serialize a => Content s a where
   refs ::
-    (forall r. RRef s r -> ref) ->
-    (forall r. CRef s r -> ref) ->
+    (forall r. Var s r -> ref) ->
+    (forall r. Ref s r -> ref) ->
     (a -> [ref])
   default refs ::
     (Generic a, GContent s (Rep a)) =>
-    (forall r. RRef s r -> ref) ->
-    (forall r. CRef s r -> ref) ->
+    (forall r. Var s r -> ref) ->
+    (forall r. Ref s r -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
 
 class GContent s a where
   grefs ::
-    (forall r. RRef s r -> ref) ->
-    (forall r. CRef s r -> ref) ->
+    (forall r. Var s r -> ref) ->
+    (forall r. Ref s r -> ref) ->
     (a x -> [ref])
 
 instance Content s a => GContent s (K1 c a) where grefs fr fc (K1 a) = refs fr fc a
@@ -140,7 +188,7 @@ data Cache = Cache
 
 data Store (root :: * -> *) = Store
   { storeCache :: Cache,
-    storeRoot :: UUID -- RRef (root RRef CRef)
+    storeRoot :: UUID -- Var (root Var Ref)
   }
 
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
@@ -185,7 +233,7 @@ liftSTM = Transaction . lift . lift
 transact ::
   forall root q a.
   (forall s. Serialize (root s)) =>
-  -- TODO hide RRef and CRef in this constraint
+  -- TODO hide Var and Ref in this constraint
   (forall s. root s -> Transaction s a) ->
   CasperT q root IO a
 transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
@@ -194,7 +242,7 @@ transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
   let ctx = TransactionContext rLockSet' cLockSet' cache
   (a, TransactionCommits commits) <-
     atomically . runTransaction ctx $ do
-      root <- readMut (RRef $ unsafeMkDKey rootRef)
+      root <- readVar (Var $ unsafeMkDKey rootRef)
       action root
 
   commits
@@ -217,34 +265,6 @@ transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
       STM (a, TransactionCommits)
     runTransaction ctx (Transaction m) = runReaderT (runStateT m (TransactionCommits (pure ()))) ctx
 
--- transact' ::
---   -- TODO hide RRef and CRef in this constraint
---   Content RRef CRef (root RRef CRef) =>
---   ( forall mut imm.
---     localRoot mut imm ->
---     Transaction mut imm a
---   ) ->
---   CasperT' s storeRoot localRoot IO a
-
--- newtype CasperT' s storeRoot localRoot m a
---   = CasperT'
---       ( ReaderT
---           (forall m i. storeRoot m i -> Transaction m i (m (localRoot m i)))
---           (CasperT s storeRoot m)
---           a
---       )
-
-{- FIXME
-localRoot ::
-  ( forall mut imm.
-    root mut imm ->
-    Transaction mut imm (mut (root' mut imm))
-  ) ->
-  CasperT s root' m a ->
-  CasperT s root m a
-localRoot _ = undefined
--}
-
 newtype UserTracker k = UserTracker (TVar (HashMap k (TVar Int)))
 
 bump :: (Eq k, Hashable k) => k -> UserTracker k -> STM ()
@@ -260,7 +280,7 @@ debump :: (Eq k, Hashable k) => k -> UserTracker k -> STM Int
 debump k (UserTracker userMap') = do
   userMap <- readTVar userMap'
   case HashMap.lookup k userMap of
-    Nothing -> error "asdfasdf"
+    Nothing -> throwSTM (Exception.AssertionFailed "can't debump non-existent key")
     Just count' -> do
       count <- readTVar count'
       let newCount = count - 1
@@ -276,10 +296,10 @@ checkUsers k (UserTracker userMap') = do
     Nothing -> pure 0
     Just count' -> readTVar count'
 
-getMutVar :: RRef s a -> IO (TVar a) -> Transaction s (TVar a)
-getMutVar ref createNewVar = Transaction $ do
+getVar :: Var s a -> IO (TVar a) -> Transaction s (TVar a)
+getVar ref createNewVar = Transaction $ do
   TransactionContext resourceLocks _ (Cache rcache _ rusers _) <- ask
-  let RRef key = ref
+  let Var key = ref
       uuid = unDKey key
   lift . lift . safeIOToSTM $ do
     atomically $ do
@@ -290,48 +310,48 @@ getMutVar ref createNewVar = Transaction $ do
     mCachedVar <- DMap.lookup key <$> readTVarIO rcache
     case mCachedVar of
       Nothing -> do
-        newVar <- createNewVar
+        var <- createNewVar
         -- Just in case the resource was inserted while we were reading/decoding it,
         -- we recheck the cache before inserting
         atomically $ do
           mCachedVar' <- DMap.lookup key <$> readTVar rcache
           case mCachedVar' of
             Nothing -> do
-              modifyTVar rcache (DMap.insert newVar key)
-              pure newVar
+              modifyTVar rcache (DMap.insert var key)
+              pure var
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
 
-readMut :: Serialize a => RRef s a -> Transaction s a
-readMut ref = do
-  var <- getMutVar ref $ do
-    let uuid = unDKey $ unResourceRef ref
-    bs <- readImmFromDisk uuid
+readVar :: Serialize a => Var s a -> Transaction s a
+readVar ref = do
+  var <- getVar ref $ do
+    let UUID uuid = unDKey $ unResourceRef ref
+    bs <- readVarFromDisk (UUID uuid)
     case Serialize.decode bs of
-      Left err -> error err
+      Left err ->
+        error $
+          unwords
+            [ "corrupt content for",
+              show (toUUID uuid) <> ":",
+              err
+            ]
       Right !a -> newTVarIO a
   liftSTM (readTVar var)
 
-parseContentRef :: ByteString -> Either String (CRef s r)
-parseContentRef = error "not implemented"
-
-parseResourceRef :: ByteString -> Either String (RRef s r)
-parseResourceRef = error "not implemented"
-
-writeMut :: Content s a => RRef s a -> a -> Transaction s ()
-writeMut ref a = do
-  var <- getMutVar ref $ newTVarIO a
+writeVar :: Content s a => Var s a -> a -> Transaction s ()
+writeVar ref a = do
+  var <- getVar ref $ newTVarIO a
   liftSTM $ writeTVar var a -- This is unfortunately a double write if we create a new TVar
   -- TODO add writeback action to commits
 
-newMut :: a -> Transaction s (RRef s a)
-newMut = undefined
+newVar :: a -> Transaction s (Var s a)
+newVar = undefined
 
-readImm :: CRef s a -> Transaction s a
-readImm = undefined
+readRef :: Ref s a -> Transaction s a
+readRef = undefined
 
-newImm :: a -> Transaction s (CRef s a)
-newImm = undefined
+newRef :: a -> Transaction s (Ref s a)
+newRef = undefined
 
 -- | Assures that the IO computation finalizes no matter if the STM transaction
 -- is aborted or retried. The IO computation run in a different thread.
@@ -354,8 +374,8 @@ safeIOToSTM req = unsafeIOToSTM $ do
     Right x -> return x
     Left e -> Exception.throw e
 
-readImmFromDisk :: UUID -> IO ByteString
-readImmFromDisk dkey = undefined
+readVarFromDisk :: UUID -> IO ByteString
+readVarFromDisk = undefined
 
-writeImmToDisk :: UUID -> ByteString -> IO ()
-writeImmToDisk = undefined
+writeVarToDisk :: UUID -> ByteString -> IO ()
+writeVarToDisk = undefined

@@ -14,13 +14,11 @@ extra-source-files: README.md
 
 library
   exposed-modules:
-    Content
+    Casper
     DMap
-    HTraversable
     LargeWords
-    Lib
-    Use
 
+  other-modules:    Use
   hs-source-dirs:   src
   default-language: Haskell2010
   ghc-options:      -Wall
@@ -42,7 +40,9 @@ library
     , process
     , resourcet
     , stm
+    , text
     , unordered-containers
+    , uuid
 
 test-suite casper-spec
   type:             exitcode-stdio-1.0
