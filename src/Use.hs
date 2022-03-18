@@ -1,36 +1,46 @@
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 module Use where
 
 import Control.Monad.IO.Class (liftIO)
+import Data.Aeson
 import Data.Kind (Type)
+import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
 import Lib
 
-data Root mut imm = Root (mut (Foo mut imm)) (mut (Foo mut imm))
+data Root s = Root (RRef s (Foo s)) (RRef s (Foo s))
+  deriving stock (Generic)
+  deriving anyclass (FromJSON, ToJSON)
+  deriving (Serialize) via WrapAeson (Root s)
 
-data Foo mut imm = Foo
-  { mi :: mut Int,
-    mli :: mut [Int],
-    lmi :: [mut Int],
-    rec :: mut (Foo mut imm),
-    recs :: mut [Foo mut imm],
+data Foo s = Foo
+  { mi :: RRef s Int,
+    mli :: RRef s [Int],
+    lmi :: [RRef s Int],
+    rec :: RRef s (Foo s),
+    recs :: RRef s [Foo s],
     val :: Int
   }
-  deriving (Generic)
+  deriving stock (Generic)
+  deriving anyclass (FromJSON, ToJSON)
+  deriving (Serialize) via WrapAeson (Foo s)
 
-data Dataset i = Dataset ([i (Datapoint i)])
-  deriving (Generic)
+deriving instance Content s (Foo s)
 
-instance Content m i (Dataset i)
+-- data Dataset i = Dataset ([i (Datapoint i)])
+--   deriving (Generic)
 
-data Datapoint i = DataPoint (i Int)
+-- instance Content m i (Dataset i)
+
+-- data Datapoint i = DataPoint (i Int)
 
 {-
   t1 = transaction:
@@ -61,7 +71,7 @@ data Datapoint i = DataPoint (i Int)
 --       datapoint_B_A
 --       datapoint_B_B
 
-instance Content mut imm (Foo mut imm)
+-- instance Content mut imm (Foo mut imm)
 
 someFunc :: IO ()
 someFunc =
@@ -70,7 +80,7 @@ someFunc =
       foo1 <- readMut l
       foo2 <- readMut (rec foo1)
       readMut (mi foo1)
-    localRoot (\(Root l r) -> rec <$> readMut l) $ do
-      liftIO $ putStrLn "Changed root"
-      pure ()
+    -- localRoot (\(Root l r) -> rec <$> readMut l) $ do
+    --   liftIO $ putStrLn "Changed root"
+    --   pure ()
     pure ()

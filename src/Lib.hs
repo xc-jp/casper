@@ -4,9 +4,10 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -15,21 +16,27 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
+-- TODO
+--   Var
+--   Ref
+
 module Lib
   ( transact,
     -- localRoot,
     readMut,
-    toUUID,
     writeMut,
     newMut,
     loadStore,
     liftSTM,
+    WrapAeson (..),
+    Content (..),
     Transaction,
     CasperT,
+    RRef,
+    CRef,
   )
 where
 
-import Content
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
@@ -43,13 +50,14 @@ import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Lazy as BL
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Hashable (Hashable)
 import Data.Kind (Type)
+import Data.Serialize (Serialize)
+import qualified Data.Serialize as Serialize
 import Data.Typeable
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
@@ -63,9 +71,65 @@ newtype UUID = UUID Word128
 newtype SHA = SHA Word256
   deriving newtype (Eq, Hashable)
 
-newtype ContentRef a = ContentRef (DKey SHA a)
+newtype CRef s a = CRef (DKey SHA a)
 
-newtype ResourceRef a = ResourceRef {unResourceRef :: DKey UUID (TVar a)}
+instance FromJSON (CRef s a) where parseJSON = undefined
+
+instance ToJSON (CRef s a) where toJSON = undefined
+
+instance Serialize (CRef s a) where
+  get = undefined
+  put = undefined
+
+instance Content s (CRef s a) where refs _ fc c = pure $ fc c
+
+newtype RRef s a = RRef {unResourceRef :: DKey UUID (TVar a)}
+
+instance Serialize (RRef s a) where
+  get = undefined
+  put = undefined
+
+instance FromJSON (RRef s a) where parseJSON = undefined
+
+instance ToJSON (RRef s a) where toJSON = undefined
+
+instance Content s (RRef s a) where refs fr _ r = pure $ fr r
+
+instance Content s a => Content s [a]
+
+instance Content s Int where refs _ _ _ = []
+
+class Serialize a => Content s a where
+  refs ::
+    (forall r. RRef s r -> ref) ->
+    (forall r. CRef s r -> ref) ->
+    (a -> [ref])
+  default refs ::
+    (Generic a, GContent s (Rep a)) =>
+    (forall r. RRef s r -> ref) ->
+    (forall r. CRef s r -> ref) ->
+    (a -> [ref])
+  refs fr fc a = grefs fr fc (from a)
+
+class GContent s a where
+  grefs ::
+    (forall r. RRef s r -> ref) ->
+    (forall r. CRef s r -> ref) ->
+    (a x -> [ref])
+
+instance Content s a => GContent s (K1 c a) where grefs fr fc (K1 a) = refs fr fc a
+
+instance GContent s a => GContent s (M1 i c a) where grefs fr fc (M1 a) = grefs fr fc a
+
+instance (GContent s a, GContent s b) => GContent s (a :*: b) where grefs fr fc (a :*: b) = grefs fr fc a <> grefs fr fc b
+
+instance (GContent s a, GContent s b) => GContent s (a :+: b) where
+  grefs fr fc (L1 a) = grefs fr fc a
+  grefs fr fc (R1 b) = grefs fr fc b
+
+instance GContent s U1 where grefs _ _ _ = []
+
+instance GContent s V1 where grefs _ _ _ = []
 
 data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
@@ -74,21 +138,19 @@ data Cache = Cache
     contentUsers :: UserTracker SHA -- determines whether content can be released
   }
 
-data Store root = Store
+data Store (root :: * -> *) = Store
   { storeCache :: Cache,
-    storeRoot :: ResourceRef (root ResourceRef ContentRef)
+    storeRoot :: UUID -- RRef (root RRef CRef)
   }
+
+newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
+
+instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
+  put = Serialize.put . Aeson.encode . unWrapAeson
+  get = Serialize.get >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
 
 keepAlive :: [UUID] -> CasperT s root m a -> CasperT s root m a
 keepAlive = undefined
-
-{-
-
-set1     |--| |--| |--| |--| |--| |--| |--|
-datasets |--| |--| |--| |--| |--| |--| |--|
-root |--------------------------------------|
-
--}
 
 -- TODO only write once per SHA/UUID
 -- TODO Make atomic write/move pairs
@@ -96,22 +158,17 @@ newtype TransactionCommits = TransactionCommits {onCommit :: IO ()}
 
 -- newtype Datasets mut imm = Datasets (Map UUID (mut (Dataset mut imm)))
 
-data TransactionContext mut imm = TransactionContext
+data TransactionContext = TransactionContext
   { txResourceLocks :: TVar (HashSet UUID),
     txContentLocks :: TVar (HashSet SHA),
-    txCache :: Cache,
-    -- :(
-    txMutRef :: forall a. mut a -> ResourceRef a,
-    txRefMut :: forall a. ResourceRef a -> mut a,
-    txImmRef :: forall a. imm a -> ContentRef a,
-    txRefImm :: forall a. ContentRef a -> imm a
+    txCache :: Cache
   }
 
-newtype Transaction (mut :: Type -> Type) (imm :: Type -> Type) a = Transaction
+newtype Transaction s a = Transaction
   { unTransaction ::
       StateT
         TransactionCommits
-        (ReaderT (TransactionContext mut imm) STM)
+        (ReaderT TransactionContext STM)
         a
   }
   deriving (Functor, Monad, Applicative)
@@ -122,24 +179,24 @@ newtype CasperT s root m a = CasperT (ReaderT (Store root) m a)
 loadStore :: FilePath -> (forall s. CasperT s root m a) -> m a
 loadStore _ _ = undefined
 
-liftSTM :: STM a -> Transaction mut imm a
+liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
 transact ::
-  -- TODO hide ResourceRef and ContentRef in this constraint
-  Content ResourceRef ContentRef (root ResourceRef ContentRef) =>
-  ( forall mut imm.
-    root mut imm ->
-    Transaction mut imm a
-  ) ->
-  CasperT s root IO a
+  forall root q a.
+  (forall s. Serialize (root s)) =>
+  -- TODO hide RRef and CRef in this constraint
+  (forall s. root s -> Transaction s a) ->
+  CasperT q root IO a
 transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
   rLockSet' <- newTVarIO mempty
   cLockSet' <- newTVarIO mempty
-  let ctx = TransactionContext rLockSet' cLockSet' cache id id id id
-  (a, TransactionCommits commits) <- atomically . runTransaction ctx $ do
-    root <- readMut rootRef
-    action root
+  let ctx = TransactionContext rLockSet' cLockSet' cache
+  (a, TransactionCommits commits) <-
+    atomically . runTransaction ctx $ do
+      root <- readMut (RRef $ unsafeMkDKey rootRef)
+      action root
+
   commits
   rLockSet <- readTVarIO rLockSet'
   forM_ rLockSet $ \rLock -> atomically $ do
@@ -155,14 +212,14 @@ transact action = CasperT . ReaderT $ \(Store cache rootRef) -> do
   pure a
   where
     runTransaction ::
-      TransactionContext mut imm ->
-      Transaction mut imm a ->
+      TransactionContext ->
+      Transaction s a ->
       STM (a, TransactionCommits)
     runTransaction ctx (Transaction m) = runReaderT (runStateT m (TransactionCommits (pure ()))) ctx
 
 -- transact' ::
---   -- TODO hide ResourceRef and ContentRef in this constraint
---   Content ResourceRef ContentRef (root ResourceRef ContentRef) =>
+--   -- TODO hide RRef and CRef in this constraint
+--   Content RRef CRef (root RRef CRef) =>
 --   ( forall mut imm.
 --     localRoot mut imm ->
 --     Transaction mut imm a
@@ -187,12 +244,6 @@ localRoot ::
   CasperT s root m a
 localRoot _ = undefined
 -}
-
-toResourceRef :: mut a -> Transaction mut imm (ResourceRef a)
-toResourceRef mut = Transaction $ asks (($ mut) . txMutRef)
-
-toUUID :: mut a -> Transaction mut imm UUID
-toUUID mut = unDKey . unResourceRef <$> toResourceRef mut
 
 newtype UserTracker k = UserTracker (TVar (HashMap k (TVar Int)))
 
@@ -225,10 +276,10 @@ checkUsers k (UserTracker userMap') = do
     Nothing -> pure 0
     Just count' -> readTVar count'
 
-getMutVar :: Content mut imm a => mut a -> IO (TVar a) -> Transaction mut imm (TVar a)
-getMutVar mut createNewVar = Transaction $ do
-  TransactionContext resourceLocks _ (Cache rcache _ rusers _) m2r r2m _ r2i <- ask
-  let ResourceRef key = m2r mut
+getMutVar :: RRef s a -> IO (TVar a) -> Transaction s (TVar a)
+getMutVar ref createNewVar = Transaction $ do
+  TransactionContext resourceLocks _ (Cache rcache _ rusers _) <- ask
+  let RRef key = ref
       uuid = unDKey key
   lift . lift . safeIOToSTM $ do
     atomically $ do
@@ -251,36 +302,35 @@ getMutVar mut createNewVar = Transaction $ do
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
 
-readMut :: forall mut imm a. Content mut imm a => mut a -> Transaction mut imm a
-readMut mut = do
-  TransactionContext _ _ _ _ hideMut _ hideImm <- Transaction ask
-  uuid <- toUUID mut
-  var <- getMutVar mut $ do
+readMut :: Serialize a => RRef s a -> Transaction s a
+readMut ref = do
+  var <- getMutVar ref $ do
+    let uuid = unDKey $ unResourceRef ref
     bs <- readImmFromDisk uuid
-    case decode (fmap hideMut . parseResourceRef) (fmap hideImm . parseContentRef) bs of
+    case Serialize.decode bs of
       Left err -> error err
       Right !a -> newTVarIO a
   liftSTM (readTVar var)
 
-parseContentRef :: ByteString -> Either String (ContentRef r)
+parseContentRef :: ByteString -> Either String (CRef s r)
 parseContentRef = error "not implemented"
 
-parseResourceRef :: ByteString -> Either String (ResourceRef r)
+parseResourceRef :: ByteString -> Either String (RRef s r)
 parseResourceRef = error "not implemented"
 
-writeMut :: Content mut imm a => mut a -> a -> Transaction mut imm ()
-writeMut mut a = do
-  var <- getMutVar mut $ newTVarIO a
+writeMut :: Content s a => RRef s a -> a -> Transaction s ()
+writeMut ref a = do
+  var <- getMutVar ref $ newTVarIO a
   liftSTM $ writeTVar var a -- This is unfortunately a double write if we create a new TVar
   -- TODO add writeback action to commits
 
-newMut :: a -> Transaction mut imm (mut a)
+newMut :: a -> Transaction s (RRef s a)
 newMut = undefined
 
-readImm :: imm a -> Transaction mut imm a
+readImm :: CRef s a -> Transaction s a
 readImm = undefined
 
-newImm :: a -> Transaction mut imm (imm a)
+newImm :: a -> Transaction s (CRef s a)
 newImm = undefined
 
 -- | Assures that the IO computation finalizes no matter if the STM transaction
