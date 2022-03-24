@@ -145,7 +145,7 @@ instance Content s a => Content s [a]
 
 instance Content s Int where refs _ _ _ = []
 
-class Serialize a => Content s a where
+class Content s a where
   refs ::
     (forall r. Var s r -> ref) ->
     (forall r. Ref s r -> ref) ->
@@ -226,6 +226,7 @@ loadStore _ _ = undefined
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
+-- TODO: should this also require Content s (root s)?
 transact ::
   forall root q a.
   (forall s. Serialize (root s)) =>
@@ -333,7 +334,7 @@ readVar ref = do
       Right !a -> newTVarIO a
   liftSTM (readTVar var)
 
-writeVar :: Content s a => Var s a -> a -> Transaction s ()
+writeVar :: (Content s a, Serialize a) => Var s a -> a -> Transaction s ()
 writeVar ref a = do
   var <- getVar ref $ newTVarIO a
   liftSTM $ writeTVar var a -- This is unfortunately a double write if we create a new TVar
