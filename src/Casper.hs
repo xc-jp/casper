@@ -17,23 +17,36 @@
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
 module Casper
-  ( transact,
+  ( -- * transactions
+    Transaction,
+    transact,
     borrow,
+
+    -- * Variables for mutable content
+    Var,
+    fakeVar,
     readVar,
     writeVar,
     newVar,
-    readRef,
-    newRef,
-    loadStore,
-    liftSTM,
-    WrapAeson (..),
-    Content (..),
-    Transaction,
-    CasperT,
-    Var,
-    fakeVar,
+
+    -- * References to immutable content
     Ref,
     fakeRef,
+    readRef,
+    newRef,
+
+    -- * CasperT and Store
+    CasperT,
+    Store,
+    loadStore,
+    getStore,
+    runCasperT,
+    liftSTM,
+
+    -- * Type classes and data types
+    Content (..),
+    Rescope (..),
+    WrapAeson (..),
   )
 where
 
@@ -249,6 +262,12 @@ newtype CasperT s m a = CasperT (ReaderT (Store s) m a)
 
 loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
 loadStore _ _ = undefined
+
+getStore :: Applicative m => CasperT s m (Store s)
+getStore = CasperT $ ReaderT pure
+
+runCasperT :: Store s -> CasperT s m a -> m a
+runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
