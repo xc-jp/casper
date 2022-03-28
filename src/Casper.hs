@@ -220,7 +220,10 @@ instance (GRescope a c, GRescope b d) => GRescope (a :+: b) (c :+: d) where
   grescope (L1 a) = L1 (grescope a)
   grescope (R1 b) = R1 (grescope b)
 
-instance GRescope f f where
+instance GRescope U1 U1 where
+  grescope = id
+
+instance GRescope V1 V1 where
   grescope = id
 
 data Cache = Cache
