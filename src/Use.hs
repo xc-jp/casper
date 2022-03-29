@@ -13,6 +13,7 @@ import Casper
 import Data.Aeson
 import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
+import Rescope
 
 data Root s = Root (Var (Foo s) s) (Var (Foo s) s)
   deriving stock (Generic)
@@ -33,7 +34,7 @@ data Foo s = Foo
 
 deriving instance Content s (Foo s)
 
-deriving instance Rescope (Foo s) (Foo t)
+deriving via (GenericRescope (Foo t)) instance Rescope (Foo s) (Foo t)
 
 -- >>> import qualified Data.Aeson as Aeson
 -- >>> Aeson.encode exampleFoo
@@ -49,4 +50,4 @@ someFunc =
       foo2 <- readVar (rec foo1)
       writeVar (mi foo2) 0
     borrow (readVar l >>= readVar . rec) $ \l' -> do
-      pure (val l')
+      transact $ readVar (mi l')

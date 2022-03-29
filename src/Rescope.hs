@@ -21,31 +21,32 @@ class Rescope a b where
   rescope :: a -> b
   default rescope :: Coercible a b => a -> b
   rescope = unCoercibleRescope . rescope . CoercibleRescope
+  {-# INLINE rescope #-}
 
--- This does seem to mess up Use.hs
--- instance {-# OVERLAPPABLE #-} Rescope a a where rescope = id
+-- * Coercible wrapper
 
-deriving via (CoercibleRescope (Ref a x)) instance Rescope (Ref a s) (Ref a t)
-
-deriving via (CoercibleRescope (Var a x)) instance Rescope (Var a s) (Var a t)
-
--- Coercible wrapper
-
+-- This already is the default behavior, but having a newtype wrapper probably can't hurt
 newtype CoercibleRescope a = CoercibleRescope {unCoercibleRescope :: a}
 
 instance Coercible a b => Rescope a (CoercibleRescope b) where
+  {-# INLINE rescope #-}
   rescope a = CoercibleRescope (coerce a)
 
--- Generic wrapper
+-- * Functor wrapper
+
+newtype FunctorRescope a = FunctorRescope a
+
+instance (Functor f, Rescope a b) => Rescope (f a) (FunctorRescope (f b)) where
+  {-# INLINE rescope #-}
+  rescope = FunctorRescope . fmap rescope
+
+-- * Generic wrapper
 
 newtype GenericRescope a = GenericRescope a
 
 instance (Generic a, Generic b, GRescope (Rep a) (Rep b)) => Rescope a (GenericRescope b) where
+  {-# INLINE rescope #-}
   rescope a = GenericRescope $ to $ grescope (from a)
-
--- TODO we shouldn't need this
--- instance Rescope (Store s) (Store x) where
---   rescope (Store cache) = Store cache
 
 class GRescope a b where
   grescope :: a x -> b x
@@ -60,8 +61,27 @@ instance (GRescope a c, GRescope b d) => GRescope (a :+: b) (c :+: d) where
   grescope (L1 a) = L1 (grescope a)
   grescope (R1 b) = R1 (grescope b)
 
-instance GRescope U1 U1 where
-  grescope = id
+instance GRescope U1 U1 where grescope = id
 
-instance GRescope V1 V1 where
-  grescope = id
+instance GRescope V1 V1 where grescope = id
+
+-- * Instances
+
+deriving via (CoercibleRescope (Ref b t)) instance Rescope a b => Rescope (Ref a s) (Ref b t)
+
+deriving via (CoercibleRescope (Var b t)) instance Rescope a b => Rescope (Var a s) (Var b t)
+
+-- or, equivalently
+-- instance Rescope a b => Rescope (Var a s) (Var b t)
+-- instance Rescope a b => Rescope (Ref a s) (Ref b t)
+
+deriving via (FunctorRescope [b]) instance Rescope a b => Rescope [a] [b]
+
+-- * Identity instances
+
+-- This does seem to mess up Use.hs
+-- instance {-# OVERLAPPABLE #-} Rescope a a where rescope = id
+
+instance Rescope Int Int
+
+instance Rescope Double Double
