@@ -67,6 +67,7 @@ import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Base64.URL as Base64
+import Data.Coerce (coerce)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
@@ -163,6 +164,7 @@ borrow transaction k = do
   pinRefs fs $ do
     k (rescope fs)
 
+-- TODO These probably shouldn't be pinned as resources but as roots
 pinRefs :: forall s f x m a. (MonadIO m, MonadMask m) => Content s (f s) => f s -> CasperT x m a -> CasperT s m a
 pinRefs fs (CasperT (ReaderT k)) =
   let (uuids, shas) = mconcat $ refs @s (\(Var a) -> ([unDKey a], [])) (\(Ref b) -> ([], [unDKey b])) fs
@@ -177,7 +179,7 @@ pinRefs fs (CasperT (ReaderT k)) =
                 atomically $ do
                   forM_ uuids $ \uuid -> debump uuid (resourceUsers cache)
                   forM_ shas $ \sha -> debump sha (contentUsers cache)
-          bracket pin (const unpin) $ const $ k (rescope store)
+          bracket pin (const unpin) $ const $ k (coerce store)
 
 transact ::
   (MonadIO m, MonadMask m) =>

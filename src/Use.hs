@@ -11,9 +11,9 @@ module Use where
 
 import Casper
 import Data.Aeson
+import Data.Coerce (coerce)
 import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
-import Rescope
 
 data Root s = Root (Var (Foo s) s) (Var (Foo s) s)
   deriving stock (Generic)
@@ -34,7 +34,12 @@ data Foo s = Foo
 
 deriving instance Content s (Foo s)
 
-deriving via (GenericRescope (Foo t)) instance Rescope (Foo s) (Foo t)
+-- deriving via (GenericRescope (Foo x)) instance Rescope (Foo s) (Foo t)
+deriving instance Rescope (Foo s) (Foo t)
+
+-- TODO what the fuck how do we prevent this
+whatTheFuckHowDoWePreventThis :: Var Int a -> Var Int b
+whatTheFuckHowDoWePreventThis = coerce
 
 -- >>> import qualified Data.Aeson as Aeson
 -- >>> Aeson.encode exampleFoo
