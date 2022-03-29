@@ -22,7 +22,8 @@ class Rescope a b where
   default rescope :: Coercible a b => a -> b
   rescope = unCoercibleRescope . rescope . CoercibleRescope
 
-instance Rescope a a where rescope = id
+-- This does seem to mess up Use.hs
+-- instance {-# OVERLAPPABLE #-} Rescope a a where rescope = id
 
 deriving via (CoercibleRescope (Ref a x)) instance Rescope (Ref a s) (Ref a t)
 

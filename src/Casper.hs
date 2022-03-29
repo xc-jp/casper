@@ -137,7 +137,7 @@ newtype CasperT s m a = CasperT (ReaderT Store m a)
   deriving (Functor, Monad, Applicative, MonadIO)
 
 -- loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
-loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
+loadStore :: FilePath -> (forall s. root s -> CasperT s m a) -> m a
 loadStore _ _ = undefined
 
 -- TODO don't use/expose
@@ -152,6 +152,7 @@ liftSTM = Transaction . lift . lift
 
 -- NOTE: this should be called with Var a s or Ref a s, otherwise the
 -- datatype itself won't get pinned, only its nested content.
+-- TODO: I don't think that's true
 borrow ::
   (MonadIO m, MonadMask m, Content s (f s), forall x. Rescope (f s) (f x)) =>
   Transaction s (f s) ->
