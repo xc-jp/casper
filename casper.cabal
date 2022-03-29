@@ -15,8 +15,12 @@ extra-source-files: README.md
 library
   exposed-modules:
     Casper
+    Content
     DMap
     LargeWords
+    Ref
+    Rescope
+    Var
 
   other-modules:    Use
   hs-source-dirs:   src

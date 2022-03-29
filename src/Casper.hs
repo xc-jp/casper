@@ -50,6 +50,7 @@ module Casper
   )
 where
 
+import Content
 import Control.Applicative (liftA2)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
@@ -80,160 +81,26 @@ import qualified Data.UUID as UUID
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
 import LargeWords (Word128 (..), Word256 (..))
+import Ref
+import Rescope
+import Var
 
 newtype TransactionID = TransactionID Word
-
-newtype UUID = UUID Word128
-  deriving newtype (Eq, Hashable)
-
-instance Serialize UUID where
-  put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
-  get = UUID <$> (Word128 <$> Serialize.get <*> Serialize.get)
-
-newtype SHA = SHA Word256
-  deriving newtype (Eq, Hashable)
-
-newtype Ref a s = Ref (DKey SHA a)
-
-fakeRef :: Ref a s
-fakeRef = Ref $ unsafeMkDKey $ SHA (Word256 0 0 0 0)
-
-instance Serialize SHA where
-  get = SHA <$> (Word256 <$> Serialize.get <*> Serialize.get <*> Serialize.get <*> Serialize.get)
-  put (SHA (Word256 a b c d)) = Serialize.put a <> Serialize.put b <> Serialize.put c <> Serialize.put d
-
-instance ToJSON (Ref a s) where
-  toJSON ref =
-    Aeson.String $
-      Text.decodeLatin1 $
-        Base64.encode $
-          Serialize.runPut $
-            Serialize.put ref
-
-instance FromJSON (Ref a s) where
-  parseJSON v = do
-    txt <- Aeson.parseJSON v
-    let digest = Text.encodeUtf8 txt
-    case Base64.decode digest of
-      Left err -> fail err
-      Right bytes -> case Serialize.runGet Serialize.get bytes of
-        Left err -> fail err
-        Right x -> pure x
-
-instance Serialize (Ref a s) where
-  get = Ref . unsafeMkDKey <$> Serialize.get
-  put (Ref key) = Serialize.put $ unDKey key
-
-instance Content s (Ref a s) where refs _ fc c = pure $ fc c
-
-newtype Var a s = Var {unResourceRef :: DKey UUID (TVar a)}
-
-fakeVar :: Var a s
-fakeVar = Var $ unsafeMkDKey $ UUID $ Word128 0 0
-
-instance Serialize (Var a s) where
-  put (Var key) = Serialize.put $ unDKey key
-  get = Var . unsafeMkDKey <$> Serialize.get
-
-instance FromJSON (Var a s) where
-  parseJSON v = do
-    txt <- Aeson.parseJSON v
-    case UUID.fromText txt of
-      Nothing -> fail (show txt <> " isn't a valid UUID")
-      Just a -> pure $ Var $ unsafeMkDKey $ UUID (fromUUID a)
-
-toUUID :: Word128 -> UUID.UUID
-toUUID (Word128 a b) = UUID.fromWords64 a b
-
-fromUUID :: UUID.UUID -> Word128
-fromUUID u = Word128 a b
-  where
-    (a, b) = UUID.toWords64 u
-
-instance ToJSON (Var a s) where
-  toJSON (Var key) =
-    let UUID w = unDKey key
-     in Aeson.String (UUID.toText (toUUID w))
-
-instance Content s (Var a s) where refs fr _ r = pure $ fr r
-
-instance Content s a => Content s [a]
-
-instance Content s Int where refs _ _ _ = []
-
-class Content s a where
-  refs ::
-    (forall r. Var r s -> ref) ->
-    (forall r. Ref r s -> ref) ->
-    (a -> [ref])
-  default refs ::
-    (Generic a, GContent s (Rep a)) =>
-    (forall r. Var r s -> ref) ->
-    (forall r. Ref r s -> ref) ->
-    (a -> [ref])
-  refs fr fc a = grefs fr fc (from a)
-
-class GContent s a where
-  grefs ::
-    (forall r. Var r s -> ref) ->
-    (forall r. Ref r s -> ref) ->
-    (a x -> [ref])
-
-instance Content s a => GContent s (K1 c a) where grefs fr fc (K1 a) = refs fr fc a
-
-instance GContent s a => GContent s (M1 i c a) where grefs fr fc (M1 a) = grefs fr fc a
-
-instance (GContent s a, GContent s b) => GContent s (a :*: b) where grefs fr fc (a :*: b) = grefs fr fc a <> grefs fr fc b
-
-instance (GContent s a, GContent s b) => GContent s (a :+: b) where
-  grefs fr fc (L1 a) = grefs fr fc a
-  grefs fr fc (R1 b) = grefs fr fc b
-
-instance GContent s U1 where grefs _ _ _ = []
-
-instance GContent s V1 where grefs _ _ _ = []
-
-class Rescope a b where
-  rescope :: a -> b
-  default rescope :: (Generic a, Generic b, GRescope (Rep a) (Rep b)) => a -> b
-  rescope a = to $ grescope (from a)
-
-instance Rescope (Ref a s) (Ref a x) where
-  rescope (Ref a) = Ref a
-
-instance Rescope (Var a s) (Var a x) where
-  rescope (Var a) = Var a
-
-instance Rescope (Store s) (Store x) where
-  rescope (Store cache) = Store cache
-
-class GRescope a b where
-  grescope :: a x -> b x
-
-instance Rescope a b => GRescope (K1 c a) (K1 c' b) where grescope (K1 a) = K1 $ rescope a
-
-instance GRescope a b => GRescope (M1 i c a) (M1 i c' b) where grescope (M1 a) = M1 $ grescope a
-
-instance (GRescope a c, GRescope b d) => GRescope (a :*: b) (c :*: d) where grescope (a :*: b) = grescope a :*: grescope b
-
-instance (GRescope a c, GRescope b d) => GRescope (a :+: b) (c :+: d) where
-  grescope (L1 a) = L1 (grescope a)
-  grescope (R1 b) = R1 (grescope b)
-
-instance GRescope U1 U1 where
-  grescope = id
-
-instance GRescope V1 V1 where
-  grescope = id
 
 data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
-    resourceUsers :: UserTracker UUID, -- determines whether a resource can be released
-    contentUsers :: UserTracker SHA -- determines whether content can be released
+    resourceUsers :: UserTracker UUID, -- determines whether a resource can be freed from memory
+    contentUsers :: UserTracker SHA -- determines whether content can be freed from memory
   }
 
-newtype Store s = Store {storeCache :: Cache}
+newtype Store = Store {storeCache :: Cache}
+
+-- data Store (root :: * -> *) = Store
+--   { storeDir :: FilePath,
+--     storeCache :: Cache,
+--     storeRoot :: UUID -- Var (root Var Ref)
+--   }
 
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
 
@@ -241,9 +108,15 @@ instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
   put = Serialize.put . Aeson.encode . unWrapAeson
   get = Serialize.get >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
 
--- TODO only write once per SHA/UUID
--- TODO Make atomic write/move pairs
-newtype TransactionCommits = TransactionCommits {onCommit :: IO ()}
+data TransactionCommits = TransactionCommits
+  { varCommits :: HashMap UUID WritePair,
+    refCommits :: HashMap SHA WritePair
+  }
+
+data WritePair = WritePair {writeTemp :: IO FilePath, moveTemp :: FilePath -> IO ()}
+
+writeBracket :: WritePair -> IO () -> IO ()
+writeBracket (WritePair write move) = Exception.bracket write move . const
 
 data TransactionContext = TransactionContext
   { txResourceLocks :: TVar (HashSet UUID),
@@ -260,16 +133,18 @@ newtype Transaction s a = Transaction
   }
   deriving (Functor, Monad, Applicative)
 
-newtype CasperT s m a = CasperT (ReaderT (Store s) m a)
+newtype CasperT s m a = CasperT (ReaderT Store m a)
   deriving (Functor, Monad, Applicative, MonadIO)
 
+-- loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
 loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
 loadStore _ _ = undefined
 
-getStore :: Applicative m => CasperT s m (Store s)
+-- TODO don't use/expose
+getStore :: Applicative m => CasperT s m Store
 getStore = CasperT $ ReaderT pure
 
-runCasperT :: Store s -> CasperT s m a -> m a
+runCasperT :: Store -> CasperT s m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
@@ -280,7 +155,7 @@ liftSTM = Transaction . lift . lift
 borrow ::
   (MonadIO m, MonadMask m, Content s (f s), forall x. Rescope (f s) (f x)) =>
   Transaction s (f s) ->
-  (forall x. f x -> CasperT x m a) ->
+  (forall t. f t -> CasperT t m a) ->
   CasperT s m a
 borrow transaction k = do
   fs <- transact transaction
@@ -309,10 +184,10 @@ transact ::
   CasperT s m a
 transact transaction = CasperT . ReaderT $ \(Store cache) -> do
   bracket pin (unpin cache) $ \(rLockSet', cLockSet') -> do
-    (a, TransactionCommits commits) <-
+    (a, TransactionCommits ref var) <-
       let ctx = TransactionContext rLockSet' cLockSet' cache
        in liftIO . atomically . runTransaction ctx $ transaction
-    liftIO commits
+    liftIO $ foldr writeBracket (foldr writeBracket (pure ()) ref) var
     pure a
   where
     pin = liftIO $ do
@@ -333,7 +208,7 @@ transact transaction = CasperT . ReaderT $ \(Store cache) -> do
       TransactionContext ->
       Transaction s a ->
       STM (a, TransactionCommits)
-    runTransaction ctx (Transaction m) = runReaderT (runStateT m (TransactionCommits (pure ()))) ctx
+    runTransaction ctx (Transaction m) = runReaderT (runStateT m (TransactionCommits mempty mempty)) ctx
 
 newtype UserTracker k = UserTracker (TVar (HashMap k (TVar Int)))
 
@@ -395,7 +270,7 @@ getVar ref createNewVar = Transaction $ do
 readVar :: Serialize a => Var a s -> Transaction s a
 readVar ref = do
   var <- getVar ref $ do
-    let UUID uuid = unDKey $ unResourceRef ref
+    let UUID uuid = unDKey $ unVar ref
     bs <- readVarFromDisk (UUID uuid)
     case Serialize.decode bs of
       Left err ->
@@ -409,10 +284,15 @@ readVar ref = do
   liftSTM (readTVar var)
 
 writeVar :: (Content s a, Serialize a) => Var a s -> a -> Transaction s ()
-writeVar ref a = do
-  var <- getVar ref $ newTVarIO a
-  liftSTM $ writeTVar var a -- This is unfortunately a double write if we create a new TVar
-  -- TODO add writeback action to commits
+writeVar var a = do
+  tvar <- getVar var $ newTVarIO a
+  liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
+  let writeTemp = undefined
+      moveTemp = undefined
+  Transaction $ modify $ \(TransactionCommits v r) -> TransactionCommits (HashMap.insert (varUuid var) (WritePair writeTemp moveTemp) v) r
+
+writeVarPair :: Var s a -> WritePair
+writeVarPair = undefined
 
 newVar :: a -> Transaction s (Var a s)
 newVar = undefined
