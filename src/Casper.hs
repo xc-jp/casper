@@ -7,6 +7,7 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -76,6 +77,7 @@ import Data.Hashable (Hashable)
 import Data.Kind (Type)
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
+import Data.String (fromString)
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
