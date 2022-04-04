@@ -155,7 +155,7 @@ liftSTM = Transaction . lift . lift
 -- datatype itself won't get pinned, only its nested content.
 -- TODO: I don't think that's true
 borrow ::
-  (MonadIO m, MonadMask m, Content s (f s), forall x. Rescope (f s) (f x)) =>
+  (MonadIO m, MonadMask m, Content (f s), forall x. Rescope (f s) (f x)) =>
   Transaction s (f s) ->
   (forall t. f t -> CasperT t m a) ->
   CasperT s m a
@@ -165,9 +165,9 @@ borrow transaction k = do
     k (rescope fs)
 
 -- TODO These probably shouldn't be pinned as resources but as roots
-pinRefs :: forall s f x m a. (MonadIO m, MonadMask m) => Content s (f s) => f s -> CasperT x m a -> CasperT s m a
+pinRefs :: forall s f x m a. (MonadIO m, MonadMask m) => Content (f s) => f s -> CasperT x m a -> CasperT s m a
 pinRefs fs (CasperT (ReaderT k)) =
-  let (uuids, shas) = mconcat $ refs @s (\(Var a) -> ([unDKey a], [])) (\(Ref b) -> ([], [unDKey b])) fs
+  let (uuids, shas) = mconcat $ refs (\(Var a) -> ([unDKey a], [])) (\(Ref b) -> ([], [unDKey b])) fs
    in CasperT $
         ReaderT $ \store -> do
           let cache = storeCache store
@@ -286,7 +286,7 @@ readVar ref = do
       Right !a -> newTVarIO a
   liftSTM (readTVar var)
 
-writeVar :: (Content s a, Serialize a) => Var a s -> a -> Transaction s ()
+writeVar :: (Content a, Serialize a) => Var a s -> a -> Transaction s ()
 writeVar var a = do
   tvar <- getVar var $ newTVarIO a
   liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar

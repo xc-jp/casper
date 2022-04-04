@@ -32,7 +32,7 @@ data Foo s = Foo
   deriving anyclass (FromJSON, ToJSON)
   deriving (Serialize) via WrapAeson (Foo s)
 
-deriving instance Content s (Foo s)
+deriving instance Content (Foo s)
 
 -- deriving via (GenericRescope (Foo x)) instance Rescope (Foo s) (Foo t)
 deriving instance Rescope (Foo s) (Foo t)
