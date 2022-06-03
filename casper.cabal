@@ -28,7 +28,6 @@ library
   ghc-options:      -Wall
   build-depends:
       aeson
-    , aeson-lens
     , base                  >=4.7     && <5
     , base16-bytestring     >=1.0.0.0
     , base64-bytestring     >=1.1.0.0
