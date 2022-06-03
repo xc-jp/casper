@@ -12,7 +12,7 @@ data Word128
   = Word128
       {-# UNPACK #-} !Word64
       {-# UNPACK #-} !Word64
-  deriving stock (Eq, Generic)
+  deriving stock (Eq, Ord, Generic)
   deriving anyclass (Hashable)
 
 data Word256
@@ -21,5 +21,5 @@ data Word256
       {-# UNPACK #-} !Word64
       {-# UNPACK #-} !Word64
       {-# UNPACK #-} !Word64
-  deriving stock (Eq, Generic)
+  deriving stock (Eq, Ord, Generic)
   deriving anyclass (Hashable)

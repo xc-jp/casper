@@ -41,7 +41,7 @@ instance FromJSON (Ref a s) where
         Right x -> pure x
 
 newtype SHA = SHA Word256
-  deriving newtype (Eq, Hashable)
+  deriving newtype (Eq, Ord, Hashable)
 
 -- TODO do we need this?
 instance Serialize SHA where

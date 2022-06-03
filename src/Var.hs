@@ -14,7 +14,7 @@ import qualified Data.UUID as UUID
 import LargeWords (Word128 (..))
 
 newtype UUID = UUID Word128
-  deriving newtype (Eq, Hashable)
+  deriving newtype (Eq, Ord, Hashable)
 
 instance Serialize UUID where
   put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b

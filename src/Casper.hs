@@ -77,6 +77,8 @@ import Data.Hashable (Hashable)
 import Data.Kind (Type)
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.String (fromString)
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
@@ -94,10 +96,36 @@ data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
     resourceUsers :: UserTracker UUID, -- determines whether a resource can be freed from memory
-    contentUsers :: UserTracker SHA -- determines whether content can be freed from memory
+    contentUsers :: UserTracker SHA, -- determines whether content can be freed from memory
+    resourceRoots :: UserTracker UUID,
+    contentRoots :: UserTracker SHA
   }
 
-newtype Store = Store {storeCache :: Cache}
+newtype Store s = Store {storeCache :: Cache}
+
+newtype LocalT s m a = LocalT (ReaderT (TVar (Set UUID), TVar (Set SHA)) (CasperT s m) a)
+
+markRoot :: MonadIO m => Var a s -> LocalT s m ()
+markRoot var = LocalT $
+  ReaderT $ \(uuids', _) -> CasperT $
+    ReaderT $ \(Store cache) -> do
+      liftIO $
+        atomically $ do
+          uuids <- readTVar uuids'
+          unless (Set.member (varUuid var) uuids) $ do
+            modifyTVar uuids' (Set.insert (varUuid var))
+            bump (varUuid var) (resourceRoots cache)
+
+runLocal :: MonadIO m => Store s -> LocalT s m a -> m a
+runLocal store (LocalT m) = do
+  uuids' <- liftIO $ newTVarIO mempty
+  vars' <- liftIO $ newTVarIO mempty
+  res <- runReaderT (runCasperT store m) (uuids', vars')
+  liftIO $
+    atomically $ do
+      readTVar uuids' >>= mapM_ (flip debump (resourceRoots cache))
+      readTVar vars' >>= mapM_ (flip debump (contentRoots cache))
+  pure res
 
 -- data Store (root :: * -> *) = Store
 --   { storeDir :: FilePath,
@@ -136,7 +164,7 @@ newtype Transaction s a = Transaction
   }
   deriving (Functor, Monad, Applicative)
 
-newtype CasperT s m a = CasperT (ReaderT Store m a)
+newtype CasperT s m a = CasperT (ReaderT (Store s) m a)
   deriving (Functor, Monad, Applicative, MonadIO)
 
 -- loadStore :: FilePath -> (forall s. Var s (root s) -> CasperT s m a) -> m a
@@ -144,10 +172,10 @@ loadStore :: FilePath -> (forall s. root s -> CasperT s m a) -> m a
 loadStore _ _ = undefined
 
 -- TODO don't use/expose
-getStore :: Applicative m => CasperT s m Store
+getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
-runCasperT :: Store -> CasperT s m a -> m a
+runCasperT :: Store s -> CasperT s m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
@@ -247,6 +275,9 @@ checkUsers k (UserTracker userMap') = do
     Just count' -> readTVar count'
 
 getVar :: Var a s -> IO (TVar a) -> Transaction s (TVar a)
+getVar = undefined
+
+{-
 getVar ref createNewVar = Transaction $ do
   TransactionContext resourceLocks _ (Cache rcache _ rusers _) <- ask
   let Var key = ref
@@ -271,6 +302,7 @@ getVar ref createNewVar = Transaction $ do
               pure var
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
+      -}
 
 readVar :: Serialize a => Var a s -> Transaction s a
 readVar ref = do
