@@ -19,7 +19,6 @@ library
     DMap
     LargeWords
     Ref
-    Rescope
     Var
 
   other-modules:    Use
@@ -45,6 +44,7 @@ library
     , process
     , resourcet
     , stm
+    , temporary
     , text
     , unordered-containers
     , uuid

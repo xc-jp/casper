@@ -1,19 +1,15 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
@@ -21,7 +17,6 @@ module Casper
   ( -- * transactions
     Transaction,
     transact,
-    borrow,
 
     -- * Variables for mutable content
     Var,
@@ -39,14 +34,13 @@ module Casper
     -- * CasperT and Store
     CasperT,
     Store,
-    loadStore,
+    openStore,
     getStore,
     runCasperT,
     liftSTM,
 
     -- * Type classes and data types
     Content (..),
-    Rescope (..),
     WrapAeson (..),
   )
 where
@@ -56,9 +50,10 @@ import Control.Applicative (liftA2)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import Control.Exception (throwIO)
 import qualified Control.Exception as Exception
 import Control.Monad
-import Control.Monad.Catch (MonadMask, bracket)
+import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow, bracket)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Identity (Identity)
 import Control.Monad.Reader
@@ -66,9 +61,12 @@ import Control.Monad.State
 import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
 import Data.Coerce (coerce)
+import Data.Foldable (traverse_)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
@@ -83,11 +81,15 @@ import Data.String (fromString)
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
+import Data.UUID.V4 (nextRandom)
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
+import GHC.IO.Exception (IOErrorType (UserError))
 import LargeWords (Word128 (..), Word256 (..))
 import Ref
-import Rescope
+import System.Directory (doesFileExist, renameFile)
+import System.FilePath ((</>))
+import System.IO (hClose, openBinaryTempFile, openTempFile)
 import Var
 
 newtype TransactionID = TransactionID Word
@@ -96,12 +98,10 @@ data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
     resourceUsers :: UserTracker UUID, -- determines whether a resource can be freed from memory
-    contentUsers :: UserTracker SHA, -- determines whether content can be freed from memory
-    resourceRoots :: UserTracker UUID,
-    contentRoots :: UserTracker SHA
+    contentUsers :: UserTracker SHA -- determines whether content can be freed from memory
   }
 
-newtype Store s = Store {storeCache :: Cache}
+data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
 
@@ -110,19 +110,20 @@ instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
   get = Serialize.get >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
 
 data TransactionCommits = TransactionCommits
-  { varCommits :: HashMap UUID WritePair,
-    refCommits :: HashMap SHA WritePair
+  { varCommits :: HashMap UUID (WritePair, WritePair),
+    refCommits :: HashMap SHA (WritePair, WritePair)
   }
 
 data WritePair = WritePair {writeTemp :: IO FilePath, moveTemp :: FilePath -> IO ()}
 
-writeBracket :: WritePair -> IO () -> IO ()
-writeBracket (WritePair write move) = Exception.bracket write move . const
+writeBracket :: WritePair -> (FilePath -> IO ()) -> IO ()
+writeBracket (WritePair write move) = Exception.bracket write move
 
 data TransactionContext = TransactionContext
-  { txResourceLocks :: TVar (HashSet UUID),
+  { txResourceLocks :: TVar (HashSet UUID), -- FIXME: rename, this is about resources used by this transaction
     txContentLocks :: TVar (HashSet SHA),
-    txCache :: Cache
+    txCache :: Cache,
+    txStorePath :: FilePath
   }
 
 newtype Transaction s a = Transaction
@@ -137,13 +138,104 @@ newtype Transaction s a = Transaction
 newtype CasperT s m a = CasperT (ReaderT (Store s) m a)
   deriving (Functor, Monad, Applicative, MonadIO)
 
-retain :: Var a s -> (forall x. Store x -> Var a x -> m b) -> CasperT s m b
-retain = undefined
+deriving instance MonadMask m => MonadMask (CasperT s m)
 
-loadStore :: FilePath -> (forall s. root s -> CasperT s m a) -> m a
-loadStore _ _ = undefined
+deriving instance MonadCatch m => MonadCatch (CasperT s m)
 
--- TODO don't use/expose
+deriving instance MonadThrow m => MonadThrow (CasperT s m)
+
+-- | Retain a Var for the lifetime of the continuation by marking it as being
+-- in use.
+retain :: (MonadIO m, MonadMask m) => Transaction s (Var a s) -> (forall x. Store x -> Var a x -> m b) -> CasperT s m b
+retain transaction runner = CasperT $
+  ReaderT $ \store -> do
+    let CasperT (ReaderT go) = transact (pin store transaction)
+     in bracket (go store) (unpin store) (runner store)
+  where
+    -- We bump _within_ the transaction to prevent the variable to be garbage
+    -- collected before the bump happens.
+    pin :: Store s -> Transaction s (Var a s) -> Transaction s (Var a s)
+    pin (Store c _) t = do
+      var@(Var key) <- t
+      let uuid = unDKey key
+      liftSTM $ bump uuid (resourceUsers c)
+      pure var
+
+    unpin (Store c _) (Var key) =
+      let uuid = unDKey key
+       in void . liftIO . atomically $ debump uuid (resourceUsers c)
+
+-- data
+--  |-casper.json
+--  |-objects
+--  | |- <root>
+--  | |- <sha0>
+--  |-meta
+--    |- <root>
+--    |- <sha0>
+--
+
+data CasperManifest = CasperManifest
+  { casperVersion :: String,
+    rootResource :: UUID.UUID
+  }
+
+instance ToJSON CasperManifest where
+  toJSON (CasperManifest v r) =
+    Aeson.object
+      [ Key.fromString "version" Aeson..= v,
+        Key.fromString "root" Aeson..= r
+      ]
+
+instance FromJSON CasperManifest where
+  parseJSON value = do
+    o <- Aeson.parseJSON value
+    v <- o Aeson..: "version"
+    r <- o Aeson..: "root"
+    checkVersion v
+    pure $ CasperManifest v r
+
+checkVersion :: MonadFail m => String -> m ()
+checkVersion "1" = pure ()
+checkVersion v = fail $ "Unknown casper version: " <> v
+
+emptyCache :: MonadIO m => m Cache
+emptyCache = liftIO $ do
+  resources <- newTVarIO mempty
+  content <- newTVarIO mempty
+  resourceUsers' <- UserTracker <$> newTVarIO mempty
+  contentUsers' <- UserTracker <$> newTVarIO mempty
+  pure $ Cache resources content resourceUsers' contentUsers'
+
+openStore ::
+  ( forall s. Content (root s),
+    forall s. Serialize (root s),
+    MonadMask m,
+    MonadIO m
+  ) =>
+  FilePath ->
+  root x ->
+  (forall s. root s -> CasperT s m a) ->
+  m a
+openStore casperDir initial runner = do
+  let manifest = casperDir </> "casper.json"
+  exists <- liftIO $ doesFileExist manifest
+  cache <- emptyCache
+  if exists
+    then do
+      result <- liftIO $ Aeson.eitherDecodeFileStrict' manifest
+      case result of
+        Left err -> liftIO $ throwIO (userError err)
+        Right (CasperManifest _ rootId) -> do
+          let rootVar = Var $ unsafeMkDKey (UUID $ fromUUID rootId)
+          runCasperT (Store cache casperDir) (transact (readVar rootVar) >>= runner)
+    else do
+      rootId <- liftIO nextRandom
+      let rootVar = Var $ unsafeMkDKey (UUID $ fromUUID rootId)
+      runCasperT (Store cache casperDir) (transact (writeVar rootVar initial))
+      liftIO $ Aeson.encodeFile manifest (CasperManifest "1" rootId)
+      runCasperT (Store cache casperDir) (runner initial)
+
 getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
@@ -153,39 +245,35 @@ runCasperT store (CasperT (ReaderT k)) = k store
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
--- TODO These probably shouldn't be pinned as resources but as roots
-pinRefs :: forall s f x m a. (MonadIO m, MonadMask m) => Content (f s) => f s -> CasperT x m a -> CasperT s m a
-pinRefs fs (CasperT (ReaderT k)) =
-  let (uuids, shas) = mconcat $ refs (\(Var a) -> ([unDKey a], [])) (\(Ref b) -> ([], [unDKey b])) fs
-   in CasperT $
-        ReaderT $ \store -> do
-          let cache = storeCache store
-          let pin = liftIO $
-                atomically $ do
-                  forM_ uuids $ \uuid -> bump uuid (resourceUsers cache)
-                  forM_ shas $ \sha -> bump sha (contentUsers cache)
-          let unpin = liftIO $
-                atomically $ do
-                  forM_ uuids $ \uuid -> debump uuid (resourceUsers cache)
-                  forM_ shas $ \sha -> debump sha (contentUsers cache)
-          bracket pin (const unpin) $ const $ k (coerce store)
-
 transact ::
   (MonadIO m, MonadMask m) =>
   Transaction s a ->
   CasperT s m a
-transact transaction = CasperT . ReaderT $ \(Store cache) -> do
-  -- TODO bump usages of touched vars and refs (does that just go into read/writeVar?)
-  bracket pin (unpin cache) $ \(rLockSet', cLockSet') -> do
+transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> do
+  bracket enter (exit cache) $ \(rLockSet', cLockSet') -> do
     (a, TransactionCommits ref var) <-
-      let ctx = TransactionContext rLockSet' cLockSet' cache
+      let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
        in liftIO . atomically . runTransaction ctx $ transaction
-    liftIO $ foldr writeBracket (foldr writeBracket (pure ()) ref) var
+    liftIO $ do
+      tempRefs <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) ref
+      tempVars <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) var
+      traverse_
+        ( \(k, (x, y)) ->
+            let (fx, fy) = (tempRefs HashMap.! k)
+             in moveTemp x fx *> moveTemp y fy
+        )
+        (HashMap.toList ref)
+      traverse_
+        ( \(k, (x, y)) ->
+            let (fx, fy) = (tempVars HashMap.! k)
+             in moveTemp x fx *> moveTemp y fy
+        )
+        (HashMap.toList var)
     pure a
   where
-    pin = liftIO $ do
+    enter = liftIO $ do
       liftA2 (,) (newTVarIO mempty) (newTVarIO mempty)
-    unpin cache (rLockSet', cLockSet') = liftIO $ do
+    exit cache (rLockSet', cLockSet') = liftIO $ do
       rLockSet <- readTVarIO rLockSet'
       forM_ rLockSet $ \rLock -> atomically $ do
         count <- debump rLock (resourceUsers cache)
@@ -196,7 +284,6 @@ transact transaction = CasperT . ReaderT $ \(Store cache) -> do
         count <- debump cLock (contentUsers cache)
         when (count < 1) $ do
           modifyTVar (contentCache cache) (DMap.delete' cLock)
-    -- TODO collect garbage
     runTransaction ::
       TransactionContext ->
       Transaction s a ->
@@ -235,12 +322,9 @@ checkUsers k (UserTracker userMap') = do
     Just count' -> readTVar count'
 
 getVar :: Var a s -> IO (TVar a) -> Transaction s (TVar a)
-getVar = undefined
-
-{-
-getVar ref createNewVar = Transaction $ do
-  TransactionContext resourceLocks _ (Cache rcache _ rusers _) <- ask
-  let Var key = ref
+getVar var createNewTVar = Transaction $ do
+  TransactionContext resourceLocks _ (Cache rcache _ rusers _) _ <- ask
+  let Var key = var
       uuid = unDKey key
   lift . lift . safeIOToSTM $ do
     atomically $ do
@@ -251,18 +335,17 @@ getVar ref createNewVar = Transaction $ do
     mCachedVar <- DMap.lookup key <$> readTVarIO rcache
     case mCachedVar of
       Nothing -> do
-        var <- createNewVar
+        tvar <- createNewTVar
         -- Just in case the resource was inserted while we were reading/decoding it,
         -- we recheck the cache before inserting
         atomically $ do
           mCachedVar' <- DMap.lookup key <$> readTVar rcache
           case mCachedVar' of
             Nothing -> do
-              modifyTVar rcache (DMap.insert var key)
-              pure var
+              modifyTVar rcache (DMap.insert tvar key)
+              pure tvar
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
-      -}
 
 readVar :: Serialize a => Var a s -> Transaction s a
 readVar ref = do
@@ -284,9 +367,46 @@ writeVar :: (Content a, Serialize a) => Var a s -> a -> Transaction s ()
 writeVar var a = do
   tvar <- getVar var $ newTVarIO a
   liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
-  let writeTemp = undefined
-      moveTemp = undefined
-  Transaction $ modify $ \(TransactionCommits v r) -> TransactionCommits (HashMap.insert (varUuid var) (WritePair writeTemp moveTemp) v) r
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  let varFile = casperDir </> "objects" </> varFileName var
+  let commitContent =
+        WritePair
+          ( do
+              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "varXXXXXX"
+              ByteString.hPutStr h (Serialize.encode a)
+              hClose h
+              pure fp
+          )
+          (`renameFile` varFile)
+  let commitMeta =
+        WritePair
+          ( do
+              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "metaXXXXXX"
+              ByteString.hPutStr h (Serialize.encode (meta a))
+              hClose h
+              pure fp
+          )
+          (`renameFile` varFile)
+  Transaction $
+    modify $ \(TransactionCommits v r) ->
+      TransactionCommits (HashMap.insert (varUuid var) (commitContent, commitMeta) v) r
+
+data ContentMeta = ContentMeta [UUID] [SHA]
+
+-- TODO
+instance Serialize ContentMeta where
+  get = undefined
+  put = undefined
+
+meta :: Content a => a -> ContentMeta
+meta a =
+  let (vars, refs') = unzip $ Content.refs (\(Var key) -> ([unDKey key], [])) (\(Ref key) -> ([], [unDKey key])) a
+   in ContentMeta (concat vars) (concat refs')
+
+varFileName :: Var a s -> FilePath
+varFileName (Var key) =
+  let UUID uuid = unDKey key
+   in UUID.toString $ toUUID uuid
 
 writeVarPair :: Var s a -> WritePair
 writeVarPair = undefined

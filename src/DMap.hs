@@ -1,4 +1,6 @@
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- | The design of this module is inspired by https://hackage.haskell.org/package/HMap.
 -- This module is more obviously unsound that HMap is, but we more clearly outline the conditions for safety, and put the onus of maintaining them on the user.
@@ -20,11 +22,12 @@ import qualified Data.HashMap.Strict as HashMap
 import Data.Hashable (Hashable)
 import GHC.Exts (Any)
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude (Bool, Eq, Maybe, (<$>))
+import Prelude (Bool, Eq, Maybe, Monoid, Semigroup, (<$>))
 
 -- | Caches are backed by a HashMap.
 -- Since our keys are wide integers, HashMap should give us a close and fast approximation of a wide integer IntMap.
 newtype DMap k = DMap (HashMap k Any)
+  deriving newtype (Monoid, Semigroup)
 
 -- | Given the uniqueness constraints/requirements imposed by unsafeMkDKey,
 -- a DKey should act as a witness that this @k@ is unqiuely associated with type @a@
