@@ -7,6 +7,7 @@ import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Base64.URL as Base64
+import qualified Data.ByteString.Char8 as Char8
 import Data.Hashable (Hashable)
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
@@ -14,6 +15,10 @@ import qualified Data.Text.Encoding as Text
 import LargeWords (Word256 (..))
 
 newtype Ref a s = Ref (DKey SHA a)
+  deriving (Eq, Ord)
+
+instance Show (Ref a s) where
+  show (Ref key) = show (unDKey key)
 
 fakeRef :: Ref a s
 fakeRef = Ref $ unsafeMkDKey $ SHA (Word256 0 0 0 0)
@@ -43,7 +48,9 @@ instance FromJSON (Ref a s) where
 newtype SHA = SHA Word256
   deriving newtype (Eq, Ord, Hashable)
 
--- TODO do we need this?
+instance Show SHA where
+  show sha = Char8.unpack $ Base64.encode (Serialize.runPut $ Serialize.put sha)
+
 instance Serialize SHA where
   get = SHA <$> (Word256 <$> Serialize.get <*> Serialize.get <*> Serialize.get <*> Serialize.get)
   put (SHA (Word256 a b c d)) = Serialize.put a <> Serialize.put b <> Serialize.put c <> Serialize.put d

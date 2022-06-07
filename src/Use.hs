@@ -1,37 +1,25 @@
-{-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Use where
 
 import Casper
-import Control.Applicative ((<|>))
-import Control.Lens (at, (?~))
-import Data.Aeson
-import qualified Data.Aeson as Aeson
-import Data.Coerce (coerce)
-import Data.Data (Proxy (Proxy))
-import Data.List (stripPrefix)
-import Data.Maybe (fromMaybe)
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Serialize (Serialize)
-import qualified Data.Serialize as Serialize
-import Data.String (fromString)
-import Data.Typeable (Typeable, typeRep)
-import GHC.Generics
+import Data.Typeable (Typeable)
+import GHC.Generics (Generic)
 
 data Root s = Root [Var (Foo s) s] [Var (Bar s) s]
   deriving stock (Generic)
+  deriving (Content)
   deriving anyclass (FromJSON, ToJSON)
   deriving (Serialize) via WrapAeson (Root s)
 
@@ -45,35 +33,42 @@ data Foo s = Foo
   }
   deriving stock (Generic)
   deriving anyclass (FromJSON, ToJSON)
-  deriving (Typeable)
-  deriving (JSONMeta)
-
-deriving instance Content (Foo s)
+  deriving (Typeable, Content, Eq, Show)
+  deriving (Serialize) via WrapAeson (Foo s)
 
 data Bar s = Bar
   { barbie :: Int,
     ken :: Var (Bar s) s
   }
 
--- TODO what the fuck how do we prevent this
-whatTheFuckHowDoWePreventThis :: Var Int a -> Var Int b
-whatTheFuckHowDoWePreventThis = coerce
-
-fooType :: String
-fooType = show $ typeRep (Proxy :: Proxy (Foo ()))
-
--- >>> import qualified Data.Aeson as Aeson
--- >>> Serialize.runPut (Serialize.put exampleFoo)
--- "\NUL\NUL\NUL\NUL\NUL\NUL\STX\NUL{\"mi\":\"00000000-0000-0000-0000-000000000000\",\"val\":2,\"mli\":\"00000000-0000-0000-0000-000000000000\",\"meta\":{\"meta\":{\"constructor\":\"Foo\",\"meta\":[[{\"meta\":null,\"field\":\"mi\"},[{\"meta\":null,\"field\":\"_mli\"},{\"meta\":null,\"field\":\"lmi\"}]],[{\"meta\":null,\"field\":\"rec\"},[{\"meta\":null,\"field\":\"recs\"},{\"meta\":null,\"field\":\"val\"}]]]},\"type\":\"Foo\"},\"recs\":\"00000000-0000-0000-0000-000000000000\",\"rec\":\"00000000-0000-0000-0000-000000000000\",\"lmi\":[\"00000000-0000-0000-0000-000000000000\",\"00000000-0000-0000-0000-000000000000\"]}"
+-- >>> import qualified Data.Serialize as Serialize
+-- >>> let bytes = Serialize.runPut (Serialize.put exampleFoo)
+-- >>> bytes
+-- >>> let exampleFoo' = Serialize.runGet Serialize.get bytes :: Either String (Foo s)
+-- >>> let exampleFoo'' = fmap (\f -> f {val = 3}) exampleFoo'
+-- >>> Right exampleFoo == exampleFoo'
+-- >>> Right exampleFoo == exampleFoo''
+-- >>> error $ show exampleFoo'
+-- >>> error $ show exampleFoo
+-- "{\"_mli\":\"00000000-0000-0000-0000-000000000000\",\"lmi\":[\"00000000-0000-0000-0000-000000000000\",\"00000000-0000-0000-0000-000000000000\"],\"mi\":\"00000000-0000-0000-0000-000000000000\",\"rec\":\"00000000-0000-0000-0000-000000000000\",\"recs\":\"00000000-0000-0000-0000-000000000000\",\"val\":2}"
+-- True
+-- False
+-- Right (Foo {mi = 00000000-0000-0000-0000-000000000000, _mli = 00000000-0000-0000-0000-000000000000, lmi = [00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000], rec = 00000000-0000-0000-0000-000000000000, recs = 00000000-0000-0000-0000-000000000000, val = 2})
+-- Foo {mi = 00000000-0000-0000-0000-000000000000, _mli = 00000000-0000-0000-0000-000000000000, lmi = [00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000], rec = 00000000-0000-0000-0000-000000000000, recs = 00000000-0000-0000-0000-000000000000, val = 2}
 exampleFoo :: Foo s
 exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 
+-- >>> show fakeRef
+-- "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 someFunc :: IO Int
 someFunc =
-  loadStore "/dev/null" $ \(Root l _) -> do
-    transact $ do
+  openStore "/dev/null" (Root [] []) $ \(Root ls _) -> do
+    transact $
+      loop ls 0
+  where
+    loop [] z = pure z
+    loop (l : ls) z = do
       foo1 <- readVar l
       foo2 <- readVar (rec foo1)
       writeVar (mi foo2) 0
-    borrow (readVar l >>= readVar . rec) $ \l' -> do
-      transact $ readVar (mi l')
+      loop ls (z + val foo1)

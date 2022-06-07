@@ -3,8 +3,8 @@
 
 module Var where
 
-import Control.Concurrent.STM
-import DMap
+import Control.Concurrent.STM (TVar)
+import DMap (DKey (..), unsafeMkDKey)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import Data.Hashable (Hashable)
@@ -16,11 +16,18 @@ import LargeWords (Word128 (..))
 newtype UUID = UUID Word128
   deriving newtype (Eq, Ord, Hashable)
 
+instance Show UUID where
+  show (UUID w) = show $ toUUID w
+
 instance Serialize UUID where
   put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
   get = UUID <$> (Word128 <$> Serialize.get <*> Serialize.get)
 
 newtype Var a s = Var {unVar :: DKey UUID (TVar a)}
+  deriving (Eq, Ord)
+
+instance Show (Var a s) where
+  show (Var key) = show (unDKey key)
 
 fakeVar :: Var a s
 fakeVar = Var $ unsafeMkDKey $ UUID $ Word128 0 0

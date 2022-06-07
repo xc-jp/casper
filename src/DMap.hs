@@ -22,7 +22,7 @@ import qualified Data.HashMap.Strict as HashMap
 import Data.Hashable (Hashable)
 import GHC.Exts (Any)
 import Unsafe.Coerce (unsafeCoerce)
-import Prelude (Bool, Eq, Maybe, Monoid, Semigroup, (<$>))
+import Prelude (Bool, Eq, Maybe, Monoid, Ord, Semigroup, (<$>))
 
 -- | Caches are backed by a HashMap.
 -- Since our keys are wide integers, HashMap should give us a close and fast approximation of a wide integer IntMap.
@@ -32,6 +32,7 @@ newtype DMap k = DMap (HashMap k Any)
 -- | Given the uniqueness constraints/requirements imposed by unsafeMkDKey,
 -- a DKey should act as a witness that this @k@ is unqiuely associated with type @a@
 newtype DKey k a = DKey {unDKey :: k}
+  deriving (Eq, Ord)
 
 -- | This is safe iff the key is not used elsewhere to create a DKey of a different type.
 -- In our case, DKeys are come from either UUIDs, or content hashes.

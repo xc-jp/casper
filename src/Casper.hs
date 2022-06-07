@@ -58,10 +58,12 @@ import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Identity (Identity)
 import Control.Monad.Reader
 import Control.Monad.State
+import Crypto.Hash (Digest, SHA256 (SHA256), hash, hashWith)
 import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
+import Data.ByteArray (withByteArray)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
@@ -82,12 +84,14 @@ import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
 import Data.UUID.V4 (nextRandom)
+import Foreign (peek)
+import Foreign.Ptr (plusPtr)
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
 import GHC.IO.Exception (IOErrorType (UserError))
 import LargeWords (Word128 (..), Word256 (..))
 import Ref
-import System.Directory (doesFileExist, renameFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile, openTempFile)
 import Var
@@ -106,8 +110,10 @@ data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
 
 instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
-  put = Serialize.put . Aeson.encode . unWrapAeson
-  get = Serialize.get >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
+  put = Serialize.putLazyByteString . Aeson.encode . unWrapAeson
+  get = do
+    i <- Serialize.remaining
+    Serialize.getBytes i >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
 
 data TransactionCommits = TransactionCommits
   { varCommits :: HashMap UUID (WritePair, WritePair),
@@ -227,13 +233,21 @@ openStore casperDir initial runner = do
       case result of
         Left err -> liftIO $ throwIO (userError err)
         Right (CasperManifest _ rootId) -> do
-          let rootVar = Var $ unsafeMkDKey (UUID $ fromUUID rootId)
+          let rootUUID = UUID $ fromUUID rootId
+          let rootVar = Var $ unsafeMkDKey rootUUID
+          -- retain the root resource
+          liftIO $ atomically $ bump rootUUID (resourceUsers cache)
           runCasperT (Store cache casperDir) (transact (readVar rootVar) >>= runner)
     else do
       rootId <- liftIO nextRandom
-      let rootVar = Var $ unsafeMkDKey (UUID $ fromUUID rootId)
+      let rootUUID = UUID $ fromUUID rootId
+      let rootVar = Var $ unsafeMkDKey rootUUID
       runCasperT (Store cache casperDir) (transact (writeVar rootVar initial))
       liftIO $ Aeson.encodeFile manifest (CasperManifest "1" rootId)
+      -- retain the root resource
+      liftIO $ atomically $ bump rootUUID (resourceUsers cache)
+      -- we don't need to debump the root after runner is finished because we
+      -- drop the cache completely
       runCasperT (Store cache casperDir) (runner initial)
 
 getStore :: Applicative m => CasperT s m (Store s)
@@ -347,11 +361,54 @@ getVar var createNewTVar = Transaction $ do
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
 
+readSha :: Digest SHA256 -> IO SHA
+readSha digest = withByteArray digest $ \ptr -> do
+  wa <- peek ptr
+  wb <- peek (ptr `plusPtr` 8)
+  wc <- peek (ptr `plusPtr` 16)
+  wd <- peek (ptr `plusPtr` 24)
+  pure $ SHA (Word256 wa wb wc wd)
+
+newRef :: (Content a, Serialize a) => a -> Transaction s (Ref a s)
+newRef a = do
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  let encoded = Serialize.encode a
+  let digest = hashWith SHA256 encoded
+  (sha, exists) <- liftSTM $
+    safeIOToSTM $ do
+      s <- readSha digest
+      e <- doesFileExist (casperDir </> "objects" </> show s)
+      pure (s, e)
+  let commits = commitValue casperDir (show sha) encoded (meta a)
+  unless exists $
+    Transaction $
+      modify $ \(TransactionCommits v r) ->
+        TransactionCommits v (HashMap.insert sha commits r)
+  pure $ Ref (unsafeMkDKey sha)
+
+readRef :: (Serialize a, Content a) => Ref a s -> Transaction s a
+readRef ref = do
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  let Ref key = ref
+  let sha = unDKey key
+  liftSTM . safeIOToSTM $ do
+    bs <- ByteString.readFile (casperDir </> "objects" </> show sha)
+    case Serialize.decode bs of
+      Left err ->
+        error $
+          unwords
+            [ "corrupt content for",
+              show sha <> ":",
+              err
+            ]
+      Right !a -> pure a
+
 readVar :: Serialize a => Var a s -> Transaction s a
 readVar ref = do
+  TransactionContext _ _ _ casperDir <- Transaction ask
   var <- getVar ref $ do
     let UUID uuid = unDKey $ unVar ref
-    bs <- readVarFromDisk (UUID uuid)
+    bs <- readVarFromDisk casperDir (UUID uuid)
     case Serialize.decode bs of
       Left err ->
         error $
@@ -363,62 +420,91 @@ readVar ref = do
       Right !a -> newTVarIO a
   liftSTM (readTVar var)
 
-writeVar :: (Content a, Serialize a) => Var a s -> a -> Transaction s ()
-writeVar var a = do
-  tvar <- getVar var $ newTVarIO a
-  liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
-  TransactionContext _ _ _ casperDir <- Transaction ask
-  let varFile = casperDir </> "objects" </> varFileName var
+readVarFromDisk :: FilePath -> UUID -> IO ByteString
+readVarFromDisk casperDir uuid =
+  let objectFile = casperDir </> "objects" </> varFileName uuid
+   in ByteString.readFile objectFile
+
+commitValue :: FilePath -> FilePath -> ByteString -> ContentMeta -> (WritePair, WritePair)
+commitValue casperDir fileName a meta' =
   let commitContent =
         WritePair
           ( do
+              createDirectoryIfMissing True (casperDir </> "tmp")
               (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "varXXXXXX"
               ByteString.hPutStr h (Serialize.encode a)
               hClose h
               pure fp
           )
-          (`renameFile` varFile)
-  let commitMeta =
+          ( \fp -> do
+              createDirectoryIfMissing True (casperDir </> "objects")
+              renameFile fp (casperDir </> "objects" </> fileName)
+          )
+      commitMeta =
         WritePair
           ( do
               (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "metaXXXXXX"
-              ByteString.hPutStr h (Serialize.encode (meta a))
+              ByteString.hPutStr h (Serialize.encode meta')
               hClose h
               pure fp
           )
-          (`renameFile` varFile)
+          ( \fp -> do
+              createDirectoryIfMissing True (casperDir </> "meta")
+              renameFile fp (casperDir </> "meta" </> fileName)
+          )
+   in (commitContent, commitMeta)
+
+varFileName :: UUID -> FilePath
+varFileName (UUID uuid) = UUID.toString $ toUUID uuid
+
+writeVar :: (Content a, Serialize a) => Var a s -> a -> Transaction s ()
+writeVar var a = do
+  tvar <- getVar var $ newTVarIO a
+  liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  let Var key = var
+  let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
-      TransactionCommits (HashMap.insert (varUuid var) (commitContent, commitMeta) v) r
+      TransactionCommits (HashMap.insert (varUuid var) commits v) r
+
+newVar' :: FilePath -> a -> IO (UUID, TVar a)
+newVar' casperDir a = loop
+  where
+    loop = do
+      u <- nextRandom
+      let uuid = UUID $ fromUUID u
+      -- ensure our UUID is not already in use
+      exists <- doesFileExist (casperDir </> "objects" </> varFileName uuid)
+      if exists
+        then loop
+        else do
+          tvar <- newTVarIO a
+          pure (uuid, tvar)
+
+newVar :: (Content a, Serialize a) => a -> Transaction s (Var a s)
+newVar a = do
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a
+  let var = Var (unsafeMkDKey uuid)
+  liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
+  let Var key = var
+  let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
+  Transaction $
+    modify $ \(TransactionCommits v r) ->
+      TransactionCommits (HashMap.insert (varUuid var) commits v) r
+  pure var
 
 data ContentMeta = ContentMeta [UUID] [SHA]
 
--- TODO
 instance Serialize ContentMeta where
-  get = undefined
-  put = undefined
+  get = liftA2 ContentMeta Serialize.get Serialize.get
+  put (ContentMeta uuids shas) = Serialize.put uuids *> Serialize.put shas
 
 meta :: Content a => a -> ContentMeta
 meta a =
   let (vars, refs') = unzip $ Content.refs (\(Var key) -> ([unDKey key], [])) (\(Ref key) -> ([], [unDKey key])) a
    in ContentMeta (concat vars) (concat refs')
-
-varFileName :: Var a s -> FilePath
-varFileName (Var key) =
-  let UUID uuid = unDKey key
-   in UUID.toString $ toUUID uuid
-
-writeVarPair :: Var s a -> WritePair
-writeVarPair = undefined
-
-newVar :: a -> Transaction s (Var a s)
-newVar = undefined
-
-readRef :: Ref a s -> Transaction s a
-readRef = undefined
-
-newRef :: a -> Transaction s (Ref a s)
-newRef = undefined
 
 -- | Assures that the IO computation finalizes no matter if the STM transaction
 -- is aborted or retried. The IO computation run in a different thread.
@@ -440,9 +526,3 @@ safeIOToSTM req = unsafeIOToSTM $ do
   case r of
     Right x -> return x
     Left e -> Exception.throw e
-
-readVarFromDisk :: UUID -> IO ByteString
-readVarFromDisk = undefined
-
-writeVarToDisk :: UUID -> ByteString -> IO ()
-writeVarToDisk = undefined
