@@ -3,7 +3,7 @@
 
 module Ref where
 
-import DMap
+import DMap (DKey (..), unsafeMkDKey)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Base64.URL as Base64

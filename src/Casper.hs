@@ -166,9 +166,11 @@ collectGarbage = CasperT $
     let UserTracker inUse = resourceUsers cache
     inUse' <- liftIO $ readTVarIO inUse
     let roots = HashMap.keys inUse'
+    liftIO $ atomically $ writeTVar (gcLock cache) True
     (uuids, shas) <-
       liftIO $
         foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.empty, HashSet.empty) roots
+    liftIO $ atomically $ writeTVar (gcLock cache) False
     liftIO $ deleteInaccessible uuids shas (casperDir </> "objects") objects
     liftIO $ deleteInaccessible uuids shas (casperDir </> "meta") metas
 
