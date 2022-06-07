@@ -60,6 +60,13 @@ exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 
 -- >>> show fakeRef
 -- "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+-- >>> import Ref(SHA)
+-- >>> import Var(UUID)
+-- >>> import Text.Read(readEither)
+-- >>> readEither (show fakeVar) :: Either String UUID
+-- >>> readEither (show fakeRef) :: Either String SHA
+-- Right 00000000-0000-0000-0000-000000000000
+-- Right AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 someFunc :: IO Int
 someFunc =
   openStore "/dev/null" (Root [] []) $ \(Root ls _) -> do

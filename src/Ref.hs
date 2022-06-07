@@ -51,6 +51,16 @@ newtype SHA = SHA Word256
 instance Show SHA where
   show sha = Char8.unpack $ Base64.encode (Serialize.runPut $ Serialize.put sha)
 
+instance Read SHA where
+  readsPrec _ str =
+    let nbytes = 32
+        nchars = 4 * ceiling (nbytes / 3 :: Double)
+     in case Base64.decode (Char8.pack (take nchars str)) of
+          Left _ -> []
+          Right b -> case Serialize.runGet Serialize.get b of
+            Left _ -> []
+            Right sha -> [(sha, drop nchars str)]
+
 instance Serialize SHA where
   get = SHA <$> (Word256 <$> Serialize.get <*> Serialize.get <*> Serialize.get <*> Serialize.get)
   put (SHA (Word256 a b c d)) = Serialize.put a <> Serialize.put b <> Serialize.put c <> Serialize.put d

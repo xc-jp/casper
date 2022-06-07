@@ -37,7 +37,9 @@ module Casper
     openStore,
     getStore,
     runCasperT,
+    retain,
     liftSTM,
+    collectGarbage,
 
     -- * Type classes and data types
     Content (..),
@@ -91,9 +93,10 @@ import GHC.Generics
 import GHC.IO.Exception (IOErrorType (UserError))
 import LargeWords (Word128 (..), Word256 (..))
 import Ref
-import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile, renameFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile, openTempFile)
+import Text.Read (readEither)
 import Var
 
 newtype TransactionID = TransactionID Word
@@ -102,7 +105,8 @@ data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
     resourceUsers :: UserTracker UUID, -- determines whether a resource can be freed from memory
-    contentUsers :: UserTracker SHA -- determines whether content can be freed from memory
+    contentUsers :: UserTracker SHA, -- determines whether content can be freed from memory
+    gcLock :: TVar Bool
   }
 
 data Store s = Store {storeCache :: Cache, storePath :: FilePath}
@@ -149,6 +153,62 @@ deriving instance MonadMask m => MonadMask (CasperT s m)
 deriving instance MonadCatch m => MonadCatch (CasperT s m)
 
 deriving instance MonadThrow m => MonadThrow (CasperT s m)
+
+-- | Remove everything from the casper store that's not accessible from the set
+-- of in-use resources.
+collectGarbage :: MonadIO m => CasperT s m ()
+collectGarbage = CasperT $
+  ReaderT $ \(Store cache casperDir) -> do
+    (objects, metas) <- liftIO $ do
+      os <- listDirectory (casperDir </> "objects")
+      ms <- listDirectory (casperDir </> "meta")
+      pure (os, ms)
+    let UserTracker inUse = resourceUsers cache
+    inUse' <- liftIO $ readTVarIO inUse
+    let roots = HashMap.keys inUse'
+    (uuids, shas) <-
+      liftIO $
+        foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.empty, HashSet.empty) roots
+    liftIO $ deleteInaccessible uuids shas (casperDir </> "objects") objects
+    liftIO $ deleteInaccessible uuids shas (casperDir </> "meta") metas
+
+sweepUUID :: FilePath -> HashSet UUID -> HashSet SHA -> UUID -> IO (HashSet UUID, HashSet SHA)
+sweepUUID casperDir uuids shas uuid =
+  if HashSet.member uuid uuids
+    then pure (uuids, shas)
+    else do
+      ContentMeta luuids lshas <- readMetaFile (casperDir </> "meta" </> varFileName uuid)
+      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (uuids, shas) luuids
+      (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
+      pure (uuids'', shas'')
+
+sweepSHA :: FilePath -> HashSet UUID -> HashSet SHA -> SHA -> IO (HashSet UUID, HashSet SHA)
+sweepSHA casperDir uuids shas sha =
+  if HashSet.member sha shas
+    then pure (uuids, shas)
+    else do
+      ContentMeta luuids lshas <- readMetaFile (casperDir </> "meta" </> show sha)
+      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (uuids, shas) luuids
+      (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
+      pure (uuids'', shas'')
+
+readMetaFile :: FilePath -> IO ContentMeta
+readMetaFile fp = do
+  bytes <- ByteString.readFile fp
+  case Serialize.runGet Serialize.get bytes of
+    Left err -> throwIO (userError err)
+    Right c -> pure c
+
+deleteInaccessible :: HashSet UUID -> HashSet SHA -> FilePath -> [FilePath] -> IO ()
+deleteInaccessible uuids shas directory =
+  traverse_
+    ( \fp ->
+        case readEither fp of
+          Left _ -> case readEither fp of
+            Left _ -> removeFile (directory </> fp)
+            Right s -> unless (HashSet.member s shas) (removeFile (directory </> fp))
+          Right u -> unless (HashSet.member u uuids) (removeFile (directory </> fp))
+    )
 
 -- | Retain a Var for the lifetime of the continuation by marking it as being
 -- in use.
@@ -211,7 +271,8 @@ emptyCache = liftIO $ do
   content <- newTVarIO mempty
   resourceUsers' <- UserTracker <$> newTVarIO mempty
   contentUsers' <- UserTracker <$> newTVarIO mempty
-  pure $ Cache resources content resourceUsers' contentUsers'
+  lock' <- newTVarIO False
+  pure $ Cache resources content resourceUsers' contentUsers' lock'
 
 openStore ::
   ( forall s. Content (root s),
@@ -277,6 +338,10 @@ transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> do
              in moveTemp x fx *> moveTemp y fy
         )
         (HashMap.toList ref)
+      -- wait for GC to finish before we update any file
+      atomically $ do
+        locked <- readTVar (gcLock cache)
+        when locked retry
       traverse_
         ( \(k, (x, y)) ->
             let (fx, fy) = (tempVars HashMap.! k)
@@ -337,7 +402,7 @@ checkUsers k (UserTracker userMap') = do
 
 getVar :: Var a s -> IO (TVar a) -> Transaction s (TVar a)
 getVar var createNewTVar = Transaction $ do
-  TransactionContext resourceLocks _ (Cache rcache _ rusers _) _ <- ask
+  TransactionContext resourceLocks _ (Cache rcache _ rusers _ _) _ <- ask
   let Var key = var
       uuid = unDKey key
   lift . lift . safeIOToSTM $ do

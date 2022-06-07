@@ -19,6 +19,10 @@ newtype UUID = UUID Word128
 instance Show UUID where
   show (UUID w) = show $ toUUID w
 
+instance Read UUID where
+  readsPrec d x =
+    fmap (\(u, s) -> (UUID (fromUUID u), s)) (readsPrec d x)
+
 instance Serialize UUID where
   put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
   get = UUID <$> (Word128 <$> Serialize.get <*> Serialize.get)
