@@ -214,7 +214,7 @@ deleteInaccessible uuids shas directory =
 
 -- | Retain a Var for the lifetime of the continuation by marking it as being
 -- in use.
-retain :: (MonadIO m, MonadMask m) => Transaction s (Var a s) -> (forall x. Store x -> Var a x -> m b) -> CasperT s m b
+retain :: (MonadIO m, MonadMask m) => Transaction s (Var (a s) s) -> (forall x. Store x -> Var (a x) x -> m b) -> CasperT s m b
 retain transaction runner = CasperT $
   ReaderT $ \store -> do
     let CasperT (ReaderT go) = transact (pin store transaction)
@@ -222,7 +222,6 @@ retain transaction runner = CasperT $
   where
     -- We bump _within_ the transaction to prevent the variable to be garbage
     -- collected before the bump happens.
-    pin :: Store s -> Transaction s (Var a s) -> Transaction s (Var a s)
     pin (Store c _) t = do
       var@(Var key) <- t
       let uuid = unDKey key
