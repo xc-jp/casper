@@ -340,13 +340,13 @@ transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> do
         )
         (HashMap.toList ref)
       -- wait for GC to finish before we update any file
-      atomically $ do
-        locked <- readTVar (gcLock cache)
-        when locked retry
+      let waitForGC = atomically $ do
+            locked <- readTVar (gcLock cache)
+            when locked retry
       traverse_
         ( \(k, (x, y)) ->
             let (fx, fy) = (tempVars HashMap.! k)
-             in moveTemp x fx *> moveTemp y fy
+             in waitForGC *> moveTemp x fx *> moveTemp y fy
         )
         (HashMap.toList var)
     pure a
