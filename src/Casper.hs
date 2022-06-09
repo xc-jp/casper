@@ -13,6 +13,85 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
+-- | "Casper" is a content addresable store using ordinary directories and files in the file system
+-- as the database, analogous to how the Git revision control system stores information. All
+-- filesystem access through __a single__ 'Store' handle in a single Haskell process is guaranteed
+-- to be thread safe by the STM library. However __no guarantees__ are provided as to the
+-- consistency of the database outside of the 'Store' handle of a single Haskell process, for
+-- example, if an application were to create multiple 'Store's to the same filesystem directory
+-- accessible by multiple threads, or if multiple processes were to access a single Casper store.
+--
+-- To use Casper, start by defining a @root@ data type that can contain all of the information that
+-- is stored in the database, such as a list or a tree of immutable 'Ref' values or mutable 'Var'
+-- values. Both 'Var' and 'Ref' data types can themselves be stored into other data types that can
+-- be written to the store. The @root@ data type is stored into a single object in the database, and
+-- contains an index to all other objects stored in the database. This @root@ object should be
+-- stored into an immutable 'Var', unless the database is to be read-only.
+--
+-- When you initialize your program, initialize the Casper database with the 'openStore'
+-- function. Assuming you want your root object to be mutable, create a 'Var' with the @root@
+-- value. Then use the 'getStore' function to retrieve the handle to the Casper store. After that,
+-- you can use 'runCasperT' on the Casper store to read from the database, or to run 'Transaction's
+-- that modify the content of the database.
+--
+-- When declaring a "root" data type, it must take at least one type variable @s@ which serves a
+-- similar purpose to the @s@ value of the 'Control.Monad.ST.ST' monad. It is also necessary for the
+-- "root" data type to derive several type classes, at a minimum:
+--
+--   - 'Content' from "Casper" in this "casper" package
+--   - 'Generic' from "GHC.Generics" in "base"
+--   - 'FromJSON' and 'ToJSON' from "Data.Aeson" in the "aeson" package
+--   - 'Serialize' from "Data.Serialize" in the "cereal" package
+--
+-- The easiest way to instantiate these type classes is with the GHC language extensions:
+--
+--   - @DeriveGeneric@
+--   - @DeriveAnyClass@
+--   - @XDerivingStrategies@
+--   - @DerivingVia@
+--
+-- Casper content is stored as 'ByteString's in the database. The "Casper" module provides a
+-- 'WrapAeson' newtype that instantiates 'Serialize' in such a way that data is serialized as a JSON
+-- string without prefixing the string with a binary integer string length. See the 'WrapAeson' data
+-- type for more information.
+--
+-- Here is a template for a program that uses a Casper database:
+--
+-- @
+-- {-# LANGUAGE DerivingStrategies #-}
+-- {-# LANGUAGE DerivingVia #-}
+-- module Main where
+-- import GHC.Generics (Generic)
+-- import Data.Aeson (FromJSON, ToJSON) -- from the "aeson" package
+-- import Data.Serialize (Serialize) -- from the "cereal" package
+--
+-- data Root s
+--     = Root
+--       { ...
+--       }
+--     deriving stock ('Generic')
+--     deriving ('Content')
+--     deriving anyclass ('FromJSON', 'ToJSON')
+--     deriving ('Serialize') via WrapAeson (Root s)
+--
+-- emptyRoot :: Root s
+-- emptyRoot = Root{ ... }
+--
+-- main :: IO ()
+-- main = do
+--     ...
+--     (root, store) <- 'openStore' "/path/to/store" emptyRoot $ \ currentRoot -> do
+--         -- store initial values
+--         root <- transact $ newVar currentRoot
+--         store <- 'getStore'
+--         pure (root, store)
+--     ...
+--     forever $ do
+--         ...
+--         runCasperT store $ do
+--             -- read/write operations on the Casper store
+--         ...
+-- @
 module Casper
   ( -- * transactions
     Transaction,
@@ -101,6 +180,8 @@ import Var
 
 newtype TransactionID = TransactionID Word
 
+-- | As the name implies, the a portion of state of the Casper 'Store' on disk is kept in memory to
+-- reduce disk access.
 data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
@@ -111,6 +192,19 @@ data Cache = Cache
 
 data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 
+-- | This is a thin wrapper that instnatiates the 'Serialize' class so that objects can be
+-- serialized as a JSON string.
+--
+-- One problem with the default instantiation of 'Serialize' via 'ToJSON' prefixes the byte string
+-- with the string length, written in the binary integer format. So JSON strings stored to files on
+-- disk via 'Serialize' are always prefixed by a few bytes (the string length) that are rejected by
+-- JSON parsers as garbage. This can cause problems with third-party utilities that may want to
+-- inspect those JSON strings stored on disk.
+--
+-- This data type solves the problem. The 'Serialize' instance is defined such that the bytestring
+-- length is not serialized, only the parsable characters are. This ensures that the JSON string
+-- written by the 'Serialize' instance to a file on disk is compatible with any standard JSON
+-- parser.
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
 
 instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
@@ -136,6 +230,15 @@ data TransactionContext = TransactionContext
     txStorePath :: FilePath
   }
 
+-- | This monad is used any time the state of the Casper store needs to change, typically when
+-- storing some 'Content' and obtaining it's 'Ref', as with 'newRef', when modifying the content of
+-- a 'Var', as with 'writeVar'.
+--
+-- A 'Transaction' monad can be evaluated by the 'transact' function, which must itself be evaluated
+-- in the 'CasperT' monad by the 'openStore' function. When a 'transact' function is live, the
+-- 'Content' being written or read, individual 'Ref' and 'Var's are protected by software
+-- transactional memory (STM) to ensure that the content being read will always be consistent, even
+-- if other threads are writing to the store and perhaps modifying the same objects being read.
 newtype Transaction s a = Transaction
   { unTransaction ::
       StateT
@@ -266,6 +369,7 @@ checkVersion :: MonadFail m => String -> m ()
 checkVersion "1" = pure ()
 checkVersion v = fail $ "Unknown casper version: " <> v
 
+-- | Flush all cached content to disk, then empty out the cache.
 emptyCache :: MonadIO m => m Cache
 emptyCache = liftIO $ do
   resources <- newTVarIO mempty
@@ -275,6 +379,17 @@ emptyCache = liftIO $ do
   lock' <- newTVarIO False
   pure $ Cache resources content resourceUsers' contentUsers' lock'
 
+-- | This function initializes a Casper 'Store', provide a 'FilePath' for where you would like to
+-- store the database in the filesystem. The @root@ value should be the data type that represents
+-- all data in your database, this data type may contain an unlimited number of 'Var' or 'Ref'
+-- values. Provide an empty @root@ value to this function in the event that the database does not
+-- exist and it needs to be initialzed. If the database does already exist, the @root@ object given
+-- to the continuation is constructed by deserializing the database root object from disk.
+--
+-- The continuation you provide to this function can perform additional initialization steps on the
+-- 'Store', but be sure to evaluate 'getStore' to return the 'Store' handle from within the
+-- 'CasperT' function context constructed by 'openStore'. context. The 'Store' handle that is
+-- created allows you to perform further transactions using the 'runCasperT' function.
 openStore ::
   ( forall s. Content (root s),
     forall s. Serialize (root s),
@@ -312,15 +427,22 @@ openStore casperDir initial runner = do
       -- drop the cache completely
       runCasperT (Store cache casperDir) (runner initial)
 
+-- | Return the 'Store' handle for the current 'CasperT' context. This is most useful when obtaining
+-- a 'Store' handle initialized by the 'openStore' function. The value returned by this function can
+-- be used with the 'runCasperT' function to perform further database transactions.
 getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
+-- | Perform a read on the casper 'Store', or use with 'transact' to perform transactions that
+-- update the state of the database.
 runCasperT :: Store s -> CasperT s m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
+-- | Evaluate a 'Transaction' function type, which can perform stateful updates on the Casper
+-- 'Store' database.
 transact ::
   (MonadIO m, MonadMask m) =>
   Transaction s a ->
@@ -435,6 +557,9 @@ readSha digest = withByteArray digest $ \ptr -> do
   wd <- peek (ptr `plusPtr` 24)
   pure $ SHA (Word256 wa wb wc wd)
 
+-- | Store a piece of 'Content' (which must be 'Serialize'-able) into the immutable portion of the
+-- store. A reference to the object in the store is created and returned. This reference is a hash
+-- of the content, so storing the exact same content will yield the exact same 'Ref'.
 newRef :: (Content a, Serialize a) => a -> Transaction s (Ref a s)
 newRef a = do
   TransactionContext _ _ _ casperDir <- Transaction ask
