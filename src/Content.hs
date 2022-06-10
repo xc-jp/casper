@@ -10,6 +10,8 @@ module Content where
 import GHC.Generics
 import Ref (Ref)
 import Var (Var)
+import qualified Data.ByteString as Strict
+import qualified Data.ByteString.Lazy as Lazy
 
 class Content a where
   refs ::
@@ -50,3 +52,7 @@ instance Content (Var a s) where refs fr _ r = pure $ fr r
 instance Content a => Content [a]
 
 instance Content Int where refs _ _ _ = []
+
+instance Content Strict.ByteString where refs _ _ _ = []
+
+instance Content Lazy.ByteString where refs _ _ _ = []
