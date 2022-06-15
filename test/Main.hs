@@ -1,86 +1,69 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DerivingVia #-}
 
-import Casper
-import Control.Exception
-import Internal (CasperError (..), Store (..), blobPath, hashBS)
-import System.Directory
-import System.FilePath
-import System.IO.Temp
-import Test.QuickCheck
-import Test.QuickCheck.Monadic
+import qualified Casper
+import Casper (CasperT)
+
+import Data.Aeson (FromJSON, ToJSON)
+import Data.ByteString.Char8 (ByteString)
+import Data.Serialize (Serialize)
+
+import Control.Monad (unless)
+
+import GHC.Generics (Generic)
+
+import System.Directory (createDirectory)
+import System.IO.Temp (withTempDirectory)
+
+import Test.Hspec (Spec, it, example)
 import Test.Tasty (TestTree, defaultMain, testGroup)
-import Test.Tasty.Hspec
-import Test.Tasty.QuickCheck
-import Control.Concurrent.STM.TVar(newTVarIO)
-import qualified Data.Set as Set
+import Test.Tasty.Hspec (testSpecs)
 
-spec :: Spec
-spec = describe "SHA256" $ do
-  it "should give path to content" $ do
-    lock <- newTVarIO False
-    activeBlocks <- newTVarIO 0
-    blobPath (hashBS "bar") (Store "foo" lock activeBlocks) `shouldBe` "foo/blob/_N4rLtula_QIYB-3If6bXDONEO5CnqBPrlURto-_j7k="
+----------------------------------------------------------------------------------------------------
 
-prop_reverse :: [Int] -> Bool
-prop_reverse xs = reverse (reverse xs) == xs
+type TestString = Casper.RawData
 
-inTemporaryStore :: (Casper.Store -> IO b) -> IO b
-inTemporaryStore f = withSystemTempDirectory "temp" $ \tmp -> initStore (tmp </> "store") >>= f
+newtype TrivialTestType s = TrivialTestType [Casper.Ref TestString s]
+  deriving stock (Generic)
+  deriving (Casper.Content)
+  deriving anyclass (FromJSON, ToJSON)
+  deriving (Serialize) via Casper.WrapAeson (TrivialTestType s)
 
--- | Storing and then retrieving the stored item should always return the stored contents
--- >>> store a >>= retrieve = a
-prop_store_retreive :: Int -> Property
-prop_store_retreive a = monadicIO $ run $ inTemporaryStore $ \root -> do
-  result <- runCasperT root $ store a >>= retrieve
-  pure $ result === Right a
+initTrivial :: TrivialTestType s
+initTrivial = TrivialTestType []
 
--- | This test transitively tests that:
--- >>> store a >>= retrieve = store a >> store a >>= retrieve
--- given 'prop_store_retrieve'
-prop_store_store_retreive :: Int -> Property
-prop_store_store_retreive a = monadicIO $ run $ inTemporaryStore $ \root -> do
-  result <- runCasperT root $ store a >> store a >>= retrieve
-  pure $ result === Right a
+fixedTestStorePath :: Maybe FilePath
+fixedTestStorePath = Nothing
 
--- | Retrieving an address after collecting garbage with no roots should yield an error
--- >>> store a >> collectGarbage >> retrieve = Left _
-prop_retrive_after_colllect_garbage :: Int -> Property
-prop_retrive_after_colllect_garbage a = monadicIO $ run $ inTemporaryStore $ \root -> do
-  Right addr <- runCasperT root $ store a
-  collectGarbage root (pure mempty)
-  result <- runCasperT root $ retrieve addr
-  pure $ result === Left (FileMissing (blobPath sha root))
-  where
-    sha = hashBS (encodeContent a)
+tempDir :: (FilePath -> IO a) -> IO a
+tempDir f = case fixedTestStorePath of
+  Nothing -> withTempDirectory "." "casper-test-store.XXXXXXXX" f
+  Just path -> createDirectory path >> f path
 
--- | If the stored address is marked as a root it should not get removed
--- store a >> markRoot a >> collectGarbage >> retrieve = a
-prop_retrive_after_colllect_garbage_with_root :: Int -> Property
-prop_retrive_after_colllect_garbage_with_root a = monadicIO $ run $ inTemporaryStore $ \root -> do
-  Right addr <- runCasperT root $ store a
-  collectGarbage root (pure (Set.singleton (forget addr)))
-  result <- runCasperT root $ retrieve addr
-  pure $ result === Right a
-
--- How do generate an arbitrary CasperT m a action?
--- runCasperT store act1 >> runCasperT store act2 = runCasperT store (act1 >> act2)
-
--- Test something with references
-
--- Inject quickcheck properties here
-return []
-
-quickTest :: TestTree
-quickTest = testProperties "quickcheck" $allProperties
+simpleTests :: Spec
+simpleTests =
+  let hello = "Hello, world!" :: TestString in
+  it ("opens a new content addressable store, stores a single value " <> show hello) $
+  example $
+  tempDir $ \ testStorePath ->
+  Casper.openStore testStorePath initTrivial $ \ rootVar -> do
+    Casper.transact $ do
+      ref <- Casper.newRef hello
+      (TrivialTestType refList) <- Casper.readVar rootVar
+      Casper.writeVar rootVar $ TrivialTestType $ ref:refList
+    Casper.transact $ do
+      (TrivialTestType refList) <- Casper.readVar rootVar
+      values <- traverse Casper.readRef refList
+      unless (values == [hello]) $
+        error $ "expecting ref to contain: " <> show [hello] <> ", got " <>show values
 
 main :: IO ()
-main = do
-  specTest <- testSpec "spec" spec
+main =
+  testGroup "Casper" <$>
+  sequence
+  [ testGroup "Simple Tests" <$> testSpecs simpleTests
+  ] >>=
   defaultMain
-    ( testGroup
-        "tests"
-        [ specTest,
-          quickTest
-        ]
-    )

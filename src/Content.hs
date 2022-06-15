@@ -11,6 +11,13 @@ import GHC.Generics
 import Ref (Ref)
 import Var (Var)
 
+-- | This provides the 'refs' method for traversing over a data type and extracting all of the
+-- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
+-- garbage collected.
+--
+-- This is orthogonal to the serialization format of the data, and our reasoning for this is that it
+-- seems to be useful to have instances for 'Void' in this typeclass, which has no meaningful
+-- deserialization method.
 class Content a where
   refs ::
     (forall s r. Var r s -> ref) ->

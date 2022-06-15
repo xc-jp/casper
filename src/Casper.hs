@@ -13,6 +13,13 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
+-- | This is the entrypoint for the Casper data store. Start with the 'openStore' function, run your
+-- application logic in the continuation passed to 'openStore'. Use the 'getStore' function to
+-- obtain a copy to the store handle, use 'runCasperT' to begin operating on the 'Store', use
+-- 'transact' to read or update the content of the 'store'.
+--
+-- This module also provides the 'Ref' and 'Var' data types, which you can use to define a storable
+-- version of your data structures.
 module Casper
   ( -- * transactions
     Transaction,
@@ -44,6 +51,8 @@ module Casper
     -- * Type classes and data types
     Content (..),
     WrapAeson (..),
+    RawData(..),
+    LazyRawData(..),
   )
 where
 
@@ -69,6 +78,7 @@ import Data.ByteArray (withByteArray)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
+import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict (HashMap)
@@ -77,11 +87,11 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Hashable (Hashable)
 import Data.Kind (Type)
-import Data.Serialize (Serialize)
+import Data.Serialize (Serialize(..))
 import qualified Data.Serialize as Serialize
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (fromString)
+import Data.String (IsString(..))
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
@@ -101,6 +111,8 @@ import Var
 
 newtype TransactionID = TransactionID Word
 
+-- | As the name implies, the a portion of state of the Casper 'Store' on disk is kept in memory to
+-- reduce disk access.
 data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
     contentCache :: TVar (DMap SHA),
@@ -111,6 +123,21 @@ data Cache = Cache
 
 data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 
+-- | This is a thin wrapper that instantiates the 'Serialize' class so that objects can be
+-- serialized as a JSON string.
+--
+-- One problem with the default instantiation of 'Serialize' via 'ToJSON'
+-- prefixes the encoded 'ByteString' with the string length if you reuse the
+-- 'Serialize' instance for 'ByteString' written in the binary integer format.
+-- So JSON strings stored to files on
+-- disk via 'Serialize' are always prefixed by a few bytes (the string length) that are rejected by
+-- JSON parsers as garbage. This can cause problems with third-party utilities that may want to
+-- inspect those JSON strings stored on disk.
+--
+-- This data type solves the problem. The 'Serialize' instance is defined such that the bytestring
+-- length is not serialized, only the parsable characters are. This ensures that the JSON string
+-- written by the 'Serialize' instance to a file on disk is compatible with any standard JSON
+-- parser.
 newtype WrapAeson a = WrapAeson {unWrapAeson :: a}
 
 instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
@@ -136,6 +163,15 @@ data TransactionContext = TransactionContext
     txStorePath :: FilePath
   }
 
+-- | This monad is used any time the state of the Casper store needs to change, typically when
+-- storing some 'Content' and obtaining it's 'Ref', as with 'newRef', when modifying the content of
+-- a 'Var', as with 'writeVar'.
+--
+-- A 'Transaction' monad can be evaluated by the 'transact' function, which must itself be evaluated
+-- in the 'CasperT' monad by the 'openStore' function. When a transaction is live, the
+-- 'Content' being written or read, individual 'Ref' and 'Var's are protected by software
+-- transactional memory (STM) to ensure that the content being read will always be consistent, even
+-- if other threads are writing to the store and perhaps modifying the same objects being read.
 newtype Transaction s a = Transaction
   { unTransaction ::
       StateT
@@ -242,6 +278,34 @@ retain transaction runner = CasperT $
 --    |- <sha0>
 --
 
+-- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
+-- the bytes.
+newtype RawData = RawData { unRawData :: ByteString }
+  deriving (Eq, Ord)
+  deriving newtype Show
+
+instance Content RawData where refs _ _ _ = []
+
+instance Serialize RawData where
+  get = Serialize.remaining >>= fmap RawData . Serialize.getBytes
+  put = Serialize.putByteString . unRawData
+
+instance IsString RawData where fromString = RawData . fromString
+
+-- | This is the same as 'RawData' but has a 'Lazy.ByteString' internally instead.
+newtype LazyRawData = LazyRawData { unLazyRawData :: Lazy.ByteString }
+  deriving (Eq, Ord)
+  deriving newtype Show
+
+instance Content LazyRawData where refs _ _ _ = []
+
+instance IsString LazyRawData where fromString = LazyRawData . fromString
+
+instance Serialize LazyRawData where
+  get = Serialize.remaining >>= fmap LazyRawData . Serialize.getLazyByteString . fromIntegral
+  put = Serialize.putLazyByteString . unLazyRawData
+
+
 data CasperManifest = CasperManifest
   { casperVersion :: String,
     rootResource :: UUID.UUID
@@ -266,6 +330,7 @@ checkVersion :: MonadFail m => String -> m ()
 checkVersion "1" = pure ()
 checkVersion v = fail $ "Unknown casper version: " <> v
 
+-- | Flush all cached content to disk, then empty out the cache.
 emptyCache :: MonadIO m => m Cache
 emptyCache = liftIO $ do
   resources <- newTVarIO mempty
@@ -275,6 +340,12 @@ emptyCache = liftIO $ do
   lock' <- newTVarIO False
   pure $ Cache resources content resourceUsers' contentUsers' lock'
 
+-- | This function initializes a Casper 'Store', provide a 'FilePath' for where you would like to
+-- create the store on the filesystem. The @root s@ value should be the data type that represents
+-- entry-point to your store from which all other data is accessible, this data type may contain an unlimited number of 'Var' or 'Ref'
+-- values. Provide an initial @root s@ value to this function in the event that the store does not
+-- exist and it needs to be initialized. If the database does already exist, the 'Var' pointing to the existing
+-- @root@ is passed to the continuation.
 openStore ::
   ( forall s. Content (root s),
     forall s. Serialize (root s),
@@ -283,7 +354,7 @@ openStore ::
   ) =>
   FilePath ->
   root x ->
-  (forall s. root s -> CasperT s m a) ->
+  (forall s. Var (root s) s -> CasperT s m a) ->
   m a
 openStore casperDir initial runner = do
   let manifest = casperDir </> "casper.json"
@@ -299,7 +370,7 @@ openStore casperDir initial runner = do
           let rootVar = Var $ unsafeMkDKey rootUUID
           -- retain the root resource
           liftIO $ atomically $ bump rootUUID (resourceUsers cache)
-          runCasperT (Store cache casperDir) (transact (readVar rootVar) >>= runner)
+          runCasperT (Store cache casperDir) (runner rootVar)
     else do
       rootId <- liftIO nextRandom
       let rootUUID = UUID $ fromUUID rootId
@@ -310,17 +381,23 @@ openStore casperDir initial runner = do
       liftIO $ atomically $ bump rootUUID (resourceUsers cache)
       -- we don't need to debump the root after runner is finished because we
       -- drop the cache completely
-      runCasperT (Store cache casperDir) (runner initial)
+      runCasperT (Store cache casperDir) (runner rootVar)
 
+-- | Return the 'Store' handle for the current 'CasperT' context. This is provided to allow a 'Store'
+-- handle to be easily passed to other threads created by e.g. 'forkIO'.
 getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
+-- | Perform a read on the casper 'Store', or use with 'transact' to perform transactions that
+-- update the state of the database.
 runCasperT :: Store s -> CasperT s m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
+-- | Evaluate a 'Transaction' function type, which can perform stateful updates on the Casper
+-- 'Store' database.
 transact ::
   (MonadIO m, MonadMask m) =>
   Transaction s a ->
@@ -435,6 +512,9 @@ readSha digest = withByteArray digest $ \ptr -> do
   wd <- peek (ptr `plusPtr` 24)
   pure $ SHA (Word256 wa wb wc wd)
 
+-- | Store a piece of 'Content' (which must be 'Serialize'-able) into the immutable portion of the
+-- store. A reference to the object in the store is created and returned. This reference is a hash
+-- of the content, so storing the exact same content will yield the exact same 'Ref'.
 newRef :: (Content a, Serialize a) => a -> Transaction s (Ref a s)
 newRef a = do
   TransactionContext _ _ _ casperDir <- Transaction ask
@@ -498,7 +578,7 @@ commitValue casperDir fileName a meta' =
           ( do
               createDirectoryIfMissing True (casperDir </> "tmp")
               (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "varXXXXXX"
-              ByteString.hPutStr h (Serialize.encode a)
+              ByteString.hPutStr h a
               hClose h
               pure fp
           )
