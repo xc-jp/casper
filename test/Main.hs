@@ -10,6 +10,9 @@ import Casper (CasperT)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 (ByteString)
 import Data.Serialize (Serialize)
+
+import Control.Monad (unless)
+
 import GHC.Generics (Generic)
 
 import System.Directory (createDirectory)
@@ -33,8 +36,7 @@ initTrivial :: TrivialTestType s
 initTrivial = TrivialTestType []
 
 fixedTestStorePath :: Maybe FilePath
-fixedTestStorePath =
-  Just "casper-test-store"
+fixedTestStorePath = Nothing
 
 tempDir :: (FilePath -> IO a) -> IO a
 tempDir f = case fixedTestStorePath of
@@ -53,6 +55,11 @@ simpleTests =
       ref <- Casper.newRef hello
       (TrivialTestType refList) <- Casper.readVar rootVar
       Casper.writeVar rootVar $ TrivialTestType $ ref:refList
+    Casper.transact $ do
+      (TrivialTestType refList) <- Casper.readVar rootVar
+      values <- traverse Casper.readRef refList
+      unless (values == [hello]) $
+        error $ "expecting ref to contain: " <> show [hello] <> ", got " <>show values
 
 main :: IO ()
 main =
