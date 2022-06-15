@@ -21,7 +21,7 @@ import Test.Tasty.Hspec (testSpecs)
 
 ----------------------------------------------------------------------------------------------------
 
-type TestString = ByteString
+type TestString = Casper.RawData
 
 newtype TrivialTestType s = TrivialTestType [Casper.Ref TestString s]
   deriving stock (Generic)

@@ -130,6 +130,8 @@ module Casper
     -- * Type classes and data types
     Content (..),
     WrapAeson (..),
+    RawData(..),
+    LazyRawData(..),
   )
 where
 
@@ -155,6 +157,7 @@ import Data.ByteArray (withByteArray)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
+import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict (HashMap)
@@ -163,11 +166,11 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Hashable (Hashable)
 import Data.Kind (Type)
-import Data.Serialize (Serialize)
+import Data.Serialize (Serialize(..))
 import qualified Data.Serialize as Serialize
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (fromString)
+import Data.String (IsString(..))
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
@@ -351,6 +354,34 @@ retain transaction runner = CasperT $
 --    |- <root>
 --    |- <sha0>
 --
+
+-- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
+-- the bytes.
+newtype RawData = RawData { unRawData :: ByteString }
+  deriving (Eq, Ord)
+  deriving newtype Show
+
+instance Content RawData where refs _ _ _ = []
+
+instance Serialize RawData where
+  get = Serialize.remaining >>= fmap RawData . Serialize.getBytes
+  put = Serialize.putByteString . unRawData
+
+instance IsString RawData where fromString = RawData . fromString
+
+-- | This is the same as 'RawData' but has a 'Lazy.ByteString' internally instead.
+newtype LazyRawData = LazyRawData { unLazyRawData :: Lazy.ByteString }
+  deriving (Eq, Ord)
+  deriving newtype Show
+
+instance Content LazyRawData where refs _ _ _ = []
+
+instance IsString LazyRawData where fromString = LazyRawData . fromString
+
+instance Serialize LazyRawData where
+  get = Serialize.remaining >>= fmap LazyRawData . Serialize.getLazyByteString . fromIntegral
+  put = Serialize.putLazyByteString . unLazyRawData
+
 
 data CasperManifest = CasperManifest
   { casperVersion :: String,

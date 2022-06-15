@@ -10,9 +10,14 @@ module Content where
 import GHC.Generics
 import Ref (Ref)
 import Var (Var)
-import qualified Data.ByteString as Strict
-import qualified Data.ByteString.Lazy as Lazy
 
+-- | This provides the 'refs' method for traversing over a data type and extracting all of the
+-- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
+-- garbage collected.
+--
+-- This is orthogonal to the serialization format of the data, and our reasoning for this is that it
+-- seems to be useful to have instances for 'Void' in this typeclass, which has no meaningful
+-- deserialization method.
 class Content a where
   refs ::
     (forall s r. Var r s -> ref) ->
@@ -52,7 +57,3 @@ instance Content (Var a s) where refs fr _ r = pure $ fr r
 instance Content a => Content [a]
 
 instance Content Int where refs _ _ _ = []
-
-instance Content Strict.ByteString where refs _ _ _ = []
-
-instance Content Lazy.ByteString where refs _ _ _ = []
