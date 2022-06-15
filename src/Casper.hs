@@ -126,8 +126,10 @@ data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 -- | This is a thin wrapper that instnatiates the 'Serialize' class so that objects can be
 -- serialized as a JSON string.
 --
--- One problem with the default instantiation of 'Serialize' via 'ToJSON' prefixes the byte string
--- with the string length, written in the binary integer format. So JSON strings stored to files on
+-- One problem with the default instantiation of 'Serialize' via 'ToJSON'
+-- prefixes the encoded 'ByteString' with the string length if you reuse the
+-- 'Serialize' instance for 'ByteString' written in the binary integer format.
+-- So JSON strings stored to files on
 -- disk via 'Serialize' are always prefixed by a few bytes (the string length) that are rejected by
 -- JSON parsers as garbage. This can cause problems with third-party utilities that may want to
 -- inspect those JSON strings stored on disk.
@@ -166,7 +168,7 @@ data TransactionContext = TransactionContext
 -- a 'Var', as with 'writeVar'.
 --
 -- A 'Transaction' monad can be evaluated by the 'transact' function, which must itself be evaluated
--- in the 'CasperT' monad by the 'openStore' function. When a 'transact' function is live, the
+-- in the 'CasperT' monad by the 'openStore' function. When a transaction is live, the
 -- 'Content' being written or read, individual 'Ref' and 'Var's are protected by software
 -- transactional memory (STM) to ensure that the content being read will always be consistent, even
 -- if other threads are writing to the store and perhaps modifying the same objects being read.
@@ -339,16 +341,11 @@ emptyCache = liftIO $ do
   pure $ Cache resources content resourceUsers' contentUsers' lock'
 
 -- | This function initializes a Casper 'Store', provide a 'FilePath' for where you would like to
--- store the database in the filesystem. The @root@ value should be the data type that represents
--- all data in your database, this data type may contain an unlimited number of 'Var' or 'Ref'
--- values. Provide an empty @root@ value to this function in the event that the database does not
--- exist and it needs to be initialzed. If the database does already exist, the @root@ object given
--- to the continuation is constructed by deserializing the database root object from disk.
---
--- The continuation you provide to this function can perform additional initialization steps on the
--- 'Store', but be sure to evaluate 'getStore' to return the 'Store' handle from within the
--- 'CasperT' function context constructed by 'openStore'. context. The 'Store' handle that is
--- created allows you to perform further transactions using the 'runCasperT' function.
+-- create the store on the filesystem. The @root s@ value should be the data type that represents
+-- entry-point to your store from which all other data is accessible, this data type may contain an unlimited number of 'Var' or 'Ref'
+-- values. Provide an initial @root s@ value to this function in the event that the store does not
+-- exist and it needs to be initialized. If the database does already exist, the 'Var' pointing to the existing
+-- @root@ is passed to the continuation.
 openStore ::
   ( forall s. Content (root s),
     forall s. Serialize (root s),
@@ -386,9 +383,8 @@ openStore casperDir initial runner = do
       -- drop the cache completely
       runCasperT (Store cache casperDir) (runner rootVar)
 
--- | Return the 'Store' handle for the current 'CasperT' context. This is most useful when obtaining
--- a 'Store' handle initialized by the 'openStore' function. The value returned by this function can
--- be used with the 'runCasperT' function to perform further database transactions.
+-- | Return the 'Store' handle for the current 'CasperT' context. This is provided to allow a 'Store'
+-- handle to be easily passed to other threads created by e.g. 'forkIO'.
 getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
