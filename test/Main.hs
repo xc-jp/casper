@@ -7,18 +7,16 @@
 import qualified Casper
 import Casper (CasperT)
 
-import Control.Monad (unless)
-
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 (ByteString)
 import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
 
-import System.Directory
-import System.FilePath
+import System.IO.Temp (withTempDirectory)
 
+import Test.Hspec (Spec, it, example)
 import Test.Tasty (TestTree, defaultMain, testGroup)
-import Test.Tasty.Hspec (Spec, testSpecs, it, example)
+import Test.Tasty.Hspec (testSpecs)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -33,33 +31,18 @@ newtype TrivialTestType s = TrivialTestType [Casper.Ref TestString s]
 initTrivial :: TrivialTestType s
 initTrivial = TrivialTestType []
 
--- | This test suite does not use temporary directories, it stores everything in the same place
--- every time. The reason is so that if anything goes wrong we can inspect the state of the
--- database.
-testStorePath :: FilePath
-testStorePath = "./casper-test-store"
-
--- | Create a new store, and populate it with a single 'Capser.Var' containing a whole entire
--- 'TrivialTestType'.
-trivialTestTypeNewStore
-  :: TrivialTestType s
-  -> CasperT s IO (Casper.Var (TrivialTestType s) s, Casper.Store s)
-trivialTestTypeNewStore root = do
-  root <- Casper.transact $ Casper.newVar root
-  store <- Casper.getStore
-  pure (root, store)
-
 simpleTests :: Spec
-simpleTests = do
-  let hello = "Hello, world!" :: TestString
+simpleTests =
+  let hello = "Hello, world!" :: TestString in
   it ("opens a new content addressable store, stores a single value " <> show hello) $
-    example $ do
-      (root, store) <- Casper.openStore testStorePath initTrivial trivialTestTypeNewStore
-      Casper.runCasperT store $
-        Casper.transact $ do
-          ref <- Casper.newRef hello
-          (TrivialTestType refList) <- Casper.readVar root
-          Casper.writeVar root $ TrivialTestType $ ref:refList
+  example $
+  withTempDirectory "." "casper-test-store.XXXXXXXX" $ \ testStorePath ->
+  Casper.openStore testStorePath initTrivial $ \ refList0 -> do
+    rootVar <- Casper.transact $ Casper.newVar refList0
+    Casper.transact $ do
+      ref <- Casper.newRef hello
+      (TrivialTestType refList) <- Casper.readVar rootVar
+      Casper.writeVar rootVar $ TrivialTestType $ ref:refList
 
 main :: IO ()
 main =

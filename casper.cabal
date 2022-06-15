@@ -56,14 +56,16 @@ test-suite casper-tests
   default-language: Haskell2010
   build-depends:
       aeson
-    , base              >=4.7      && <5
+    , base
     , bytestring
     , casper
     , cereal
     , containers
-    , directory         >=1.3.6.0  && <1.4
-    , filepath          >=1.4.2.1  && <1.5
-    , mtl               >=2.2.2    && <2.3
-    , tasty             >=1.3.1    && <1.4
-    , tasty-hspec       >=1.1.5.1  && <1.2
+    , directory
+    , filepath
+    , hspec
+    , mtl
+    , tasty
+    , tasty-hspec
+    , temporary
     , tf-random

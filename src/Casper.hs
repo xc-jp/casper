@@ -13,30 +13,37 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
--- | "Casper" is a content addresable store using ordinary directories and files in the file system
--- as the database, analogous to how the Git revision control system stores information. All
--- filesystem access through __a single__ 'Store' handle in a single Haskell process is guaranteed
--- to be thread safe by the STM library. However __no guarantees__ are provided as to the
--- consistency of the database outside of the 'Store' handle of a single Haskell process, for
--- example, if an application were to create multiple 'Store's to the same filesystem directory
--- accessible by multiple threads, or if multiple processes were to access a single Casper store.
+-- | "Casper" is a content addresable store using ordinary directories, and content-addressible
+-- files (files named after the SHA-1 hash of the file's conetnt) in the file system as the
+-- database, similar to how the Git revision control system stores information. All filesystem
+-- access through a single 'Store' handle in a single Haskell process is guaranteed to be thread
+-- safe by the STM library. However __no guarantees__ are provided as to the consistency of the
+-- database outside of the 'Store' handle of a single Haskell process, for example, if an
+-- application were to create multiple 'Store's to the same filesystem directory accessible by
+-- multiple threads, or if multiple processes were to access a single Casper store.
 --
--- To use Casper, start by defining a @root@ data type that can contain all of the information that
--- is stored in the database, such as a list or a tree of immutable 'Ref' values or mutable 'Var'
--- values. Both 'Var' and 'Ref' data types can themselves be stored into other data types that can
--- be written to the store. The @root@ data type is stored into a single object in the database, and
--- contains an index to all other objects stored in the database. This @root@ object should be
--- stored into an immutable 'Var', unless the database is to be read-only.
+-- The 'openStore' function is the entry point to the Casper database, which evaluates functions of
+-- type 'CasperT'. The 'Store' data type itself, and all types stored within (such as 'Ref' and
+-- 'Var') have an @s@ type variable which serves the same purpose as the @s@ type variable of the
+-- 'Control.Monad.ST.ST' function type: to prevent conflicting stateful updates to the Store
+-- content. It is expected that a Casper store will be opened with 'openStore' in a separate process
+-- thread only once, at process initialization, and a function in the 'CasperT' monad will loop
+-- forever, listining for requests on an incoming channel for database lookups and updates.
 --
--- When you initialize your program, initialize the Casper database with the 'openStore'
--- function. Assuming you want your root object to be mutable, create a 'Var' with the @root@
--- value. Then use the 'getStore' function to retrieve the handle to the Casper store. After that,
--- you can use 'runCasperT' on the Casper store to read from the database, or to run 'Transaction's
--- that modify the content of the database.
+-- To actually store and retrieve data with Casper, start by defining a @root@ data type that can
+-- contain all of the information that is stored in the database, such as a list or a tree of
+-- immutable 'Ref' values or mutable 'Var' values. Both 'Var' and 'Ref' data types can themselves be
+-- stored into other data types that can be written to the store. By traversing through the @root@
+-- data type, resolving 'Ref's and 'Var's as you go, you can extract pure data types from the store
+-- You can also fold in the other direction, converting pure data types to storable data types.
+-- 
+-- The @root@ data type is stored into a single object in the database, and contains an index to all
+-- other objects stored in the database. This @root@ object should be stored into an immutable
+-- 'Var', unless the database is to be read-only. The "root" data type must take at least one type
+-- variable @s@ which serves a similar purpose to the @s@ value of the 'Control.Monad.ST.ST'
+-- monad.
 --
--- When declaring a "root" data type, it must take at least one type variable @s@ which serves a
--- similar purpose to the @s@ value of the 'Control.Monad.ST.ST' monad. It is also necessary for the
--- "root" data type to derive several type classes, at a minimum:
+-- It also is necessary for the "root" data type to derive several type classes, at a minimum:
 --
 --   - 'Content' from "Casper" in this "casper" package
 --   - 'Generic' from "GHC.Generics" in "base"
