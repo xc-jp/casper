@@ -436,7 +436,7 @@ openStore ::
   ) =>
   FilePath ->
   root x ->
-  (forall s. root s -> CasperT s m a) ->
+  (forall s. Var (root s) s -> CasperT s m a) ->
   m a
 openStore casperDir initial runner = do
   let manifest = casperDir </> "casper.json"
@@ -452,7 +452,7 @@ openStore casperDir initial runner = do
           let rootVar = Var $ unsafeMkDKey rootUUID
           -- retain the root resource
           liftIO $ atomically $ bump rootUUID (resourceUsers cache)
-          runCasperT (Store cache casperDir) (transact (readVar rootVar) >>= runner)
+          runCasperT (Store cache casperDir) (runner rootVar)
     else do
       rootId <- liftIO nextRandom
       let rootUUID = UUID $ fromUUID rootId
@@ -463,7 +463,7 @@ openStore casperDir initial runner = do
       liftIO $ atomically $ bump rootUUID (resourceUsers cache)
       -- we don't need to debump the root after runner is finished because we
       -- drop the cache completely
-      runCasperT (Store cache casperDir) (runner initial)
+      runCasperT (Store cache casperDir) (runner rootVar)
 
 -- | Return the 'Store' handle for the current 'CasperT' context. This is most useful when obtaining
 -- a 'Store' handle initialized by the 'openStore' function. The value returned by this function can

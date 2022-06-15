@@ -69,8 +69,9 @@ exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 -- Right AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 someFunc :: IO Int
 someFunc =
-  openStore "/dev/null" (Root [] []) $ \(Root ls _) -> do
-    transact $
+  openStore "/dev/null" (Root [] []) $ \rootVar -> do
+    transact $ do
+      (Root ls _) <- readVar rootVar
       loop ls 0
   where
     loop [] z = pure z

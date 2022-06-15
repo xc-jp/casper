@@ -49,8 +49,7 @@ simpleTests =
   it ("opens a new content addressable store, stores a single value " <> show hello) $
   example $
   tempDir $ \ testStorePath ->
-  Casper.openStore testStorePath initTrivial $ \ refList0 -> do
-    rootVar <- Casper.transact $ Casper.newVar refList0
+  Casper.openStore testStorePath initTrivial $ \ rootVar -> do
     Casper.transact $ do
       ref <- Casper.newRef hello
       (TrivialTestType refList) <- Casper.readVar rootVar
