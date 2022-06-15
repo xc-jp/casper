@@ -630,7 +630,7 @@ commitValue casperDir fileName a meta' =
           ( do
               createDirectoryIfMissing True (casperDir </> "tmp")
               (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "varXXXXXX"
-              ByteString.hPutStr h (Serialize.encode a)
+              ByteString.hPutStr h a
               hClose h
               pure fp
           )
