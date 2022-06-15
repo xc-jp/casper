@@ -12,6 +12,7 @@ import Data.ByteString.Char8 (ByteString)
 import Data.Serialize (Serialize)
 import GHC.Generics (Generic)
 
+import System.Directory (createDirectory)
 import System.IO.Temp (withTempDirectory)
 
 import Test.Hspec (Spec, it, example)
@@ -31,12 +32,21 @@ newtype TrivialTestType s = TrivialTestType [Casper.Ref TestString s]
 initTrivial :: TrivialTestType s
 initTrivial = TrivialTestType []
 
+fixedTestStorePath :: Maybe FilePath
+fixedTestStorePath =
+  Just "casper-test-store"
+
+tempDir :: (FilePath -> IO a) -> IO a
+tempDir f = case fixedTestStorePath of
+  Nothing -> withTempDirectory "." "casper-test-store.XXXXXXXX" f
+  Just path -> createDirectory path >> f path
+
 simpleTests :: Spec
 simpleTests =
   let hello = "Hello, world!" :: TestString in
   it ("opens a new content addressable store, stores a single value " <> show hello) $
   example $
-  withTempDirectory "." "casper-test-store.XXXXXXXX" $ \ testStorePath ->
+  tempDir $ \ testStorePath ->
   Casper.openStore testStorePath initTrivial $ \ refList0 -> do
     rootVar <- Casper.transact $ Casper.newVar refList0
     Casper.transact $ do
