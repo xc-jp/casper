@@ -123,7 +123,7 @@ data Cache = Cache
 
 data Store s = Store {storeCache :: Cache, storePath :: FilePath}
 
--- | This is a thin wrapper that instnatiates the 'Serialize' class so that objects can be
+-- | This is a thin wrapper that instantiates the 'Serialize' class so that objects can be
 -- serialized as a JSON string.
 --
 -- One problem with the default instantiation of 'Serialize' via 'ToJSON'
