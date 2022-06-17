@@ -111,7 +111,7 @@ import Var
 
 newtype TransactionID = TransactionID Word
 
--- | As the name implies, the a portion of state of the Casper 'Store' on disk is kept in memory to
+-- | As the name implies, a portion of the state of the Casper 'Store' on disk is kept in memory to
 -- reduce disk access.
 data Cache = Cache
   { resourceCache :: TVar (DMap UUID),
@@ -268,16 +268,6 @@ retain transaction runner = CasperT $
       let uuid = unDKey key
        in void . liftIO . atomically $ debump uuid (resourceUsers c)
 
--- data
---  |-casper.json
---  |-objects
---  | |- <root>
---  | |- <sha0>
---  |-meta
---    |- <root>
---    |- <sha0>
---
-
 -- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
 -- the bytes.
 newtype RawData = RawData { unRawData :: ByteString }
@@ -305,7 +295,19 @@ instance Serialize LazyRawData where
   get = Serialize.remaining >>= fmap LazyRawData . Serialize.getLazyByteString . fromIntegral
   put = Serialize.putLazyByteString . unLazyRawData
 
-
+-- Structure of the casper store on disk:
+-- data
+--  |-casper.json
+--  |-objects
+--  | |- <root>
+--  | |- <sha0>
+--  | |- <uuid0>
+--  | |- ...
+--  |-meta
+--    |- <root>
+--    |- <sha0>
+--    |- <uuid0>
+--    |- ...
 data CasperManifest = CasperManifest
   { casperVersion :: String,
     rootResource :: UUID.UUID
@@ -330,7 +332,7 @@ checkVersion :: MonadFail m => String -> m ()
 checkVersion "1" = pure ()
 checkVersion v = fail $ "Unknown casper version: " <> v
 
--- | Flush all cached content to disk, then empty out the cache.
+-- | Initialize an empty cache
 emptyCache :: MonadIO m => m Cache
 emptyCache = liftIO $ do
   resources <- newTVarIO mempty
@@ -340,12 +342,12 @@ emptyCache = liftIO $ do
   lock' <- newTVarIO False
   pure $ Cache resources content resourceUsers' contentUsers' lock'
 
--- | This function initializes a Casper 'Store', provide a 'FilePath' for where you would like to
--- create the store on the filesystem. The @root s@ value should be the data type that represents
--- entry-point to your store from which all other data is accessible, this data type may contain an unlimited number of 'Var' or 'Ref'
--- values. Provide an initial @root s@ value to this function in the event that the store does not
--- exist and it needs to be initialized. If the database does already exist, the 'Var' pointing to the existing
--- @root@ is passed to the continuation.
+-- | Open a Casper 'Store'. This should only be done once per store as
+-- otherwise you can get inconsistent views of the stores.
+--
+-- The continuation is passed a variable pointing to the root object of your
+-- store. If the store wasn't initialized it will be created with the @root x@
+-- value as the root object in the store.
 openStore ::
   ( forall s. Content (root s),
     forall s. Serialize (root s),
@@ -383,21 +385,20 @@ openStore casperDir initial runner = do
       -- drop the cache completely
       runCasperT (Store cache casperDir) (runner rootVar)
 
--- | Return the 'Store' handle for the current 'CasperT' context. This is provided to allow a 'Store'
--- handle to be easily passed to other threads created by e.g. 'forkIO'.
+-- | Return the 'Store' handle for the current 'CasperT' context. This is
+-- provided to allow a 'Store' handle to be easily passed to other threads
+-- created by e.g. 'forkIO'.
 getStore :: Applicative m => CasperT s m (Store s)
 getStore = CasperT $ ReaderT pure
 
--- | Perform a read on the casper 'Store', or use with 'transact' to perform transactions that
--- update the state of the database.
 runCasperT :: Store s -> CasperT s m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
 liftSTM :: STM a -> Transaction s a
 liftSTM = Transaction . lift . lift
 
--- | Evaluate a 'Transaction' function type, which can perform stateful updates on the Casper
--- 'Store' database.
+-- | Evaluate a 'Transaction', if the trasaction completes successfully, the
+-- changes are comitted to the casper store.
 transact ::
   (MonadIO m, MonadMask m) =>
   Transaction s a ->
@@ -633,7 +634,6 @@ newVar a = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a
   let var = Var (unsafeMkDKey uuid)
-  liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
   let Var key = var
   let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
   Transaction $

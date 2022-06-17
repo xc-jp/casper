@@ -15,9 +15,12 @@ import Var (Var)
 -- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
 -- garbage collected.
 --
--- This is orthogonal to the serialization format of the data, and our reasoning for this is that it
--- seems to be useful to have instances for 'Void' in this typeclass, which has no meaningful
--- deserialization method.
+-- We don't provide an instance for 'ByteString' because the default
+-- 'Serialize' instance prefixes the payload with the length. This is likely
+-- not what you want if you want to store some binary file that is to be read
+-- by other processes. By not providing the 'Content' instance it's less likely
+-- that you'll use this serialization method by mistake since you can't use
+-- 'writeVar' and 'newRef'.
 class Content a where
   refs ::
     (forall s r. Var r s -> ref) ->
@@ -29,6 +32,7 @@ class Content a where
     (forall s r. Ref r s -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
+-- TODO: should 'Content' have 'Serialize' as a superclass constraint again?
 
 class GContent a where
   grefs ::
