@@ -16,26 +16,39 @@ library
   exposed-modules:
     Casper
     Content
-    Internal
+    DMap
+    LargeWords
+    Ref
+    Rescope
+    Var
 
+  other-modules:    Use
   hs-source-dirs:   src
   default-language: Haskell2010
   ghc-options:      -Wall
   build-depends:
       aeson
-    , base               >=4.7     && <5
-    , base16-bytestring  >=1.0.0.0
-    , base64-bytestring  >=1.1.0.0
+    , aeson-lens
+    , base                  >=4.7     && <5
+    , base16-bytestring     >=1.0.0.0
+    , base64-bytestring     >=1.1.0.0
     , bytestring
+    , cereal
     , containers
     , cryptonite
     , directory
     , exceptions
     , filepath
+    , hashable
+    , lens
     , memory
     , mtl
     , process
+    , resourcet
     , stm
+    , text
+    , unordered-containers
+    , uuid
 
 test-suite casper-spec
   type:             exitcode-stdio-1.0
