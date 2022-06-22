@@ -632,10 +632,12 @@ newVar' casperDir a = loop
 
 newVar :: (Content a, Serialize a) => a -> Transaction s (Var a s)
 newVar a = do
-  TransactionContext _ _ _ casperDir <- Transaction ask
+  TransactionContext _ _ (Cache rcache _ _ _ _) casperDir <- Transaction ask
   (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a
   let var = Var (unsafeMkDKey uuid)
   let Var key = var
+  -- add the variable to the resource cache
+  void . liftSTM $ modifyTVar rcache (DMap.insert tvar key)
   let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
