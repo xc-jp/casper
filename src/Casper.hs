@@ -44,7 +44,7 @@ module Casper
     openStore,
     getStore,
     runCasperT,
-    retain,
+    fork,
     liftSTM,
     collectGarbage,
 
@@ -58,7 +58,7 @@ where
 
 import Content
 import Control.Applicative (liftA2)
-import Control.Concurrent (forkIO)
+import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (throwIO)
@@ -248,13 +248,14 @@ deleteInaccessible uuids shas directory =
           Right u -> unless (HashSet.member u uuids) (removeFile (directory </> fp))
     )
 
--- | Retain a Var for the lifetime of the continuation by marking it as being
--- in use.
-retain :: (MonadIO m, MonadMask m) => Transaction s (Var (a s) s) -> (forall x. Store x -> Var (a x) x -> m b) -> CasperT s m b
-retain transaction runner = CasperT $
+-- | Provided a transaction evaluating to a 'Var', fork a thread where that
+-- 'Var' is retained at least as long the thread is running.
+fork :: (MonadIO m, MonadMask m) => Transaction s (Var (a s) s) -> (forall x. Var (a x) x -> CasperT x IO ()) -> CasperT s m ThreadId
+fork transaction runner = CasperT $
   ReaderT $ \store -> do
     let CasperT (ReaderT go) = transact (pin store transaction)
-     in bracket (go store) (unpin store) (runner store)
+    liftIO . forkIO $ do
+      bracket (go store) (unpin store) (runCasperT store . runner)
   where
     -- We bump _within_ the transaction to prevent the variable to be garbage
     -- collected before the bump happens.
