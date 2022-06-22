@@ -61,4 +61,6 @@ instance Content (Var a s) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 
+instance Content a => Content (Maybe a)
+
 instance Content Int where refs _ _ _ = []
