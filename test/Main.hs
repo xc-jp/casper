@@ -1,24 +1,19 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE OverloadedStrings #-}
 
-import qualified Casper
 import Casper (CasperT)
-
+import qualified Casper
+import Control.Monad (unless)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString.Char8 (ByteString)
 import Data.Serialize (Serialize)
-
-import Control.Monad (unless)
-
 import GHC.Generics (Generic)
-
 import System.Directory (createDirectory)
 import System.IO.Temp (withTempDirectory)
-
-import Test.Hspec (Spec, it, example)
+import Test.Hspec (Spec, example, it)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Hspec (testSpecs)
 
@@ -45,25 +40,25 @@ tempDir f = case fixedTestStorePath of
 
 simpleTests :: Spec
 simpleTests =
-  let hello = "Hello, world!" :: TestString in
-  it ("opens a new content addressable store, stores a single value " <> show hello) $
-  example $
-  tempDir $ \ testStorePath ->
-  Casper.openStore testStorePath initTrivial $ \ rootVar -> do
-    Casper.transact $ do
-      ref <- Casper.newRef hello
-      (TrivialTestType refList) <- Casper.readVar rootVar
-      Casper.writeVar rootVar $ TrivialTestType $ ref:refList
-    Casper.transact $ do
-      (TrivialTestType refList) <- Casper.readVar rootVar
-      values <- traverse Casper.readRef refList
-      unless (values == [hello]) $
-        error $ "expecting ref to contain: " <> show [hello] <> ", got " <>show values
+  let hello = "Hello, world!" :: TestString
+   in it ("opens a new content addressable store, stores a single value " <> show hello) $
+        example $
+          tempDir $ \testStorePath ->
+            Casper.openStore testStorePath initTrivial $ \rootVar -> do
+              Casper.transact $ do
+                ref <- Casper.newRef hello
+                (TrivialTestType refList) <- Casper.readVar rootVar
+                Casper.writeVar rootVar $ TrivialTestType $ ref : refList
+              Casper.transact $ do
+                (TrivialTestType refList) <- Casper.readVar rootVar
+                values <- traverse Casper.readRef refList
+                unless (values == [hello]) $
+                  error $ "expecting ref to contain: " <> show [hello] <> ", got " <> show values
 
 main :: IO ()
 main =
-  testGroup "Casper" <$>
-  sequence
-  [ testGroup "Simple Tests" <$> testSpecs simpleTests
-  ] >>=
-  defaultMain
+  testGroup "Casper"
+    <$> sequence
+      [ testGroup "Simple Tests" <$> testSpecs simpleTests
+      ]
+    >>= defaultMain

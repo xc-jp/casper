@@ -51,8 +51,8 @@ module Casper
     -- * Type classes and data types
     Content (..),
     WrapAeson (..),
-    RawData(..),
-    LazyRawData(..),
+    RawData (..),
+    LazyRawData (..),
   )
 where
 
@@ -87,11 +87,11 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Hashable (Hashable)
 import Data.Kind (Type)
-import Data.Serialize (Serialize(..))
+import Data.Serialize (Serialize (..))
 import qualified Data.Serialize as Serialize
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.String (IsString(..))
+import Data.String (IsString (..))
 import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
@@ -264,16 +264,15 @@ fork transaction runner = CasperT $
       let uuid = unDKey key
       liftSTM $ bump uuid (resourceUsers c)
       pure var
-
     unpin (Store c _) (Var key) =
       let uuid = unDKey key
-       in void . liftIO . atomically $ debump uuid (resourceUsers c)
+       in void . atomically $ debump uuid (resourceUsers c)
 
 -- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
 -- the bytes.
-newtype RawData = RawData { unRawData :: ByteString }
+newtype RawData = RawData {unRawData :: ByteString}
   deriving (Eq, Ord)
-  deriving newtype Show
+  deriving newtype (Show)
 
 instance Content RawData where refs _ _ _ = []
 
@@ -284,9 +283,9 @@ instance Serialize RawData where
 instance IsString RawData where fromString = RawData . fromString
 
 -- | This is the same as 'RawData' but has a 'Lazy.ByteString' internally instead.
-newtype LazyRawData = LazyRawData { unLazyRawData :: Lazy.ByteString }
+newtype LazyRawData = LazyRawData {unLazyRawData :: Lazy.ByteString}
   deriving (Eq, Ord)
-  deriving newtype Show
+  deriving newtype (Show)
 
 instance Content LazyRawData where refs _ _ _ = []
 

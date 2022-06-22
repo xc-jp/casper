@@ -32,6 +32,7 @@ class Content a where
     (forall s r. Ref r s -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
+
 -- TODO: should 'Content' have 'Serialize' as a superclass constraint again?
 
 class GContent a where
