@@ -23,13 +23,13 @@ import Var (Var)
 -- 'writeVar' and 'newRef'.
 class Content a where
   refs ::
-    (forall s r. Var r s -> ref) ->
-    (forall s r. Ref r s -> ref) ->
+    (forall r. Var r -> ref) ->
+    (forall r. Ref r -> ref) ->
     (a -> [ref])
   default refs ::
     (Generic a, GContent (Rep a)) =>
-    (forall s r. Var r s -> ref) ->
-    (forall s r. Ref r s -> ref) ->
+    (forall r. Var r -> ref) ->
+    (forall r. Ref r -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
 
@@ -37,11 +37,11 @@ class Content a where
 
 class GContent a where
   grefs ::
-    (forall s r. Var r s -> ref) ->
-    (forall s r. Ref r s -> ref) ->
+    (forall r. Var r -> ref) ->
+    (forall r. Ref r -> ref) ->
     (a x -> [ref])
 
-noRefs :: (forall s r. Var r s -> ref) -> (forall s r. Ref r s -> ref) -> a -> [ref]
+noRefs :: (forall r. Var r -> ref) -> (forall r. Ref r -> ref) -> a -> [ref]
 noRefs _ _ _ = []
 
 instance Content a => GContent (K1 c a) where grefs fr fc (K1 a) = refs fr fc a
@@ -58,9 +58,9 @@ instance GContent U1 where grefs = noRefs
 
 instance GContent V1 where grefs = noRefs
 
-instance Content (Ref a s) where refs _ fc c = pure $ fc c
+instance Content (Ref a) where refs _ fc c = pure $ fc c
 
-instance Content (Var a s) where refs fr _ r = pure $ fr r
+instance Content (Var a) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 

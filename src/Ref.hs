@@ -14,20 +14,20 @@ import qualified Data.Serialize as Serialize
 import qualified Data.Text.Encoding as Text
 import LargeWords (Word256 (..))
 
-newtype Ref a s = Ref (DKey SHA a)
+newtype Ref a = Ref (DKey SHA a)
   deriving (Eq, Ord)
 
-instance Show (Ref a s) where
+instance Show (Ref a) where
   show (Ref key) = show (unDKey key)
 
-fakeRef :: Ref a s
+fakeRef :: Ref a
 fakeRef = Ref $ unsafeMkDKey $ SHA (Word256 0 0 0 0)
 
-instance Serialize (Ref a s) where
+instance Serialize (Ref a) where
   get = Ref . unsafeMkDKey <$> Serialize.get
   put (Ref key) = Serialize.put $ unDKey key
 
-instance ToJSON (Ref a s) where
+instance ToJSON (Ref a) where
   toJSON ref =
     Aeson.String $
       Text.decodeLatin1 $
@@ -35,7 +35,7 @@ instance ToJSON (Ref a s) where
           Serialize.runPut $
             Serialize.put ref
 
-instance FromJSON (Ref a s) where
+instance FromJSON (Ref a) where
   parseJSON v = do
     txt <- Aeson.parseJSON v
     let digest = Text.encodeUtf8 txt

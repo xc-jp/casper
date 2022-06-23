@@ -27,20 +27,20 @@ instance Serialize UUID where
   put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
   get = UUID <$> (Word128 <$> Serialize.get <*> Serialize.get)
 
-newtype Var a s = Var {unVar :: DKey UUID (TVar a)}
+newtype Var a = Var {unVar :: DKey UUID (TVar a)}
   deriving (Eq, Ord)
 
-instance Show (Var a s) where
+instance Show (Var a) where
   show (Var key) = show (unDKey key)
 
-fakeVar :: Var a s
+fakeVar :: Var a
 fakeVar = Var $ unsafeMkDKey $ UUID $ Word128 0 0
 
-instance Serialize (Var a s) where
+instance Serialize (Var a) where
   put (Var key) = Serialize.put $ unDKey key
   get = Var . unsafeMkDKey <$> Serialize.get
 
-instance FromJSON (Var a s) where
+instance FromJSON (Var a) where
   parseJSON v = do
     txt <- Aeson.parseJSON v
     case UUID.fromText txt of
@@ -50,7 +50,7 @@ instance FromJSON (Var a s) where
 toUUID :: Word128 -> UUID.UUID
 toUUID (Word128 a b) = UUID.fromWords64 a b
 
-varUuid :: Var a s -> UUID
+varUuid :: Var a -> UUID
 varUuid = unDKey . unVar
 
 fromUUID :: UUID.UUID -> Word128
@@ -58,7 +58,7 @@ fromUUID u = Word128 a b
   where
     (a, b) = UUID.toWords64 u
 
-instance ToJSON (Var a s) where
+instance ToJSON (Var a) where
   toJSON (Var key) =
     let UUID w = unDKey key
      in Aeson.String (UUID.toText (toUUID w))

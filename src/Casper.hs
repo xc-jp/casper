@@ -121,7 +121,7 @@ data Cache = Cache
     gcLock :: TVar Bool
   }
 
-data Store s = Store {storeCache :: Cache, storePath :: FilePath}
+data Store = Store {storeCache :: Cache, storePath :: FilePath}
 
 -- | This is a thin wrapper that instantiates the 'Serialize' class so that objects can be
 -- serialized as a JSON string.
@@ -172,7 +172,7 @@ data TransactionContext = TransactionContext
 -- 'Content' being written or read, individual 'Ref' and 'Var's are protected by software
 -- transactional memory (STM) to ensure that the content being read will always be consistent, even
 -- if other threads are writing to the store and perhaps modifying the same objects being read.
-newtype Transaction s a = Transaction
+newtype Transaction a = Transaction
   { unTransaction ::
       StateT
         TransactionCommits
@@ -181,18 +181,18 @@ newtype Transaction s a = Transaction
   }
   deriving (Functor, Monad, Applicative)
 
-newtype CasperT s m a = CasperT (ReaderT (Store s) m a)
+newtype CasperT m a = CasperT (ReaderT Store m a)
   deriving (Functor, Monad, Applicative, MonadIO)
 
-deriving instance MonadMask m => MonadMask (CasperT s m)
+deriving instance MonadMask m => MonadMask (CasperT m)
 
-deriving instance MonadCatch m => MonadCatch (CasperT s m)
+deriving instance MonadCatch m => MonadCatch (CasperT m)
 
-deriving instance MonadThrow m => MonadThrow (CasperT s m)
+deriving instance MonadThrow m => MonadThrow (CasperT m)
 
 -- | Remove everything from the casper store that's not accessible from the set
 -- of in-use resources.
-collectGarbage :: MonadIO m => CasperT s m ()
+collectGarbage :: MonadIO m => CasperT m ()
 collectGarbage = CasperT $
   ReaderT $ \(Store cache casperDir) -> do
     (objects, metas) <- liftIO $ do
@@ -250,12 +250,11 @@ deleteInaccessible uuids shas directory =
 
 -- | Provided a transaction evaluating to a 'Var', fork a thread where that
 -- 'Var' is retained at least as long the thread is running.
-fork :: (MonadIO m, MonadMask m) => Transaction s (Var (a s) s) -> (forall x. Var (a x) x -> CasperT x IO ()) -> CasperT s m ThreadId
+fork :: (MonadIO m, MonadMask m) => Transaction (Var a) -> (Var a -> CasperT IO ()) -> CasperT m ThreadId
 fork transaction runner = CasperT $
   ReaderT $ \store -> do
     let CasperT (ReaderT go) = transact (pin store transaction)
-    liftIO . forkIO $ do
-      bracket (go store) (unpin store) (runCasperT store . runner)
+    liftIO . forkIO $ bracket (go store) (unpin store) (runCasperT store . runner)
   where
     -- We bump _within_ the transaction to prevent the variable to be garbage
     -- collected before the bump happens.
@@ -349,14 +348,14 @@ emptyCache = liftIO $ do
 -- store. If the store wasn't initialized it will be created with the @root x@
 -- value as the root object in the store.
 openStore ::
-  ( forall s. Content (root s),
-    forall s. Serialize (root s),
+  ( Content root,
+    Serialize root,
     MonadMask m,
     MonadIO m
   ) =>
   FilePath ->
-  root x ->
-  (forall s. Var (root s) s -> CasperT s m a) ->
+  root ->
+  (Var root -> CasperT m a) ->
   m a
 openStore casperDir initial runner = do
   let manifest = casperDir </> "casper.json"
@@ -388,63 +387,59 @@ openStore casperDir initial runner = do
 -- | Return the 'Store' handle for the current 'CasperT' context. This is
 -- provided to allow a 'Store' handle to be easily passed to other threads
 -- created by e.g. 'forkIO'.
-getStore :: Applicative m => CasperT s m (Store s)
+getStore :: Applicative m => CasperT m Store
 getStore = CasperT $ ReaderT pure
 
-runCasperT :: Store s -> CasperT s m a -> m a
+runCasperT :: Store -> CasperT m a -> m a
 runCasperT store (CasperT (ReaderT k)) = k store
 
-liftSTM :: STM a -> Transaction s a
+liftSTM :: STM a -> Transaction a
 liftSTM = Transaction . lift . lift
 
 -- | Evaluate a 'Transaction', if the trasaction completes successfully, the
 -- changes are comitted to the casper store.
 transact ::
   (MonadIO m, MonadMask m) =>
-  Transaction s a ->
-  CasperT s m a
-transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> do
-  bracket enter (exit cache) $ \(rLockSet', cLockSet') -> do
-    (a, TransactionCommits ref var) <-
-      let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
-       in liftIO . atomically . runTransaction ctx $ transaction
-    liftIO $ do
-      tempRefs <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) ref
-      tempVars <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) var
-      traverse_
-        ( \(k, (x, y)) ->
-            let (fx, fy) = (tempRefs HashMap.! k)
-             in moveTemp x fx *> moveTemp y fy
-        )
-        (HashMap.toList ref)
-      -- wait for GC to finish before we update any file
-      let waitForGC = atomically $ do
-            locked <- readTVar (gcLock cache)
-            when locked retry
-      traverse_
-        ( \(k, (x, y)) ->
-            let (fx, fy) = (tempVars HashMap.! k)
-             in waitForGC *> moveTemp x fx *> moveTemp y fy
-        )
-        (HashMap.toList var)
-    pure a
+  Transaction a ->
+  CasperT m a
+transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket enter (exit cache) $ \(rLockSet', cLockSet') -> do
+  (a, TransactionCommits ref var) <-
+    let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
+     in liftIO . atomically . runTransaction ctx $ transaction
+  liftIO $ do
+    tempRefs <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) ref
+    tempVars <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) var
+    traverse_
+      ( \(k, (x, y)) ->
+          let (fx, fy) = (tempRefs HashMap.! k)
+           in moveTemp x fx *> moveTemp y fy
+      )
+      (HashMap.toList ref)
+    -- wait for GC to finish before we update any file
+    let waitForGC = atomically $ do
+          locked <- readTVar (gcLock cache)
+          when locked retry
+    traverse_
+      ( \(k, (x, y)) ->
+          let (fx, fy) = (tempVars HashMap.! k)
+           in waitForGC *> moveTemp x fx *> moveTemp y fy
+      )
+      (HashMap.toList var)
+  pure a
   where
-    enter = liftIO $ do
-      liftA2 (,) (newTVarIO mempty) (newTVarIO mempty)
+    enter = liftIO $ liftA2 (,) (newTVarIO mempty) (newTVarIO mempty)
     exit cache (rLockSet', cLockSet') = liftIO $ do
       rLockSet <- readTVarIO rLockSet'
       forM_ rLockSet $ \rLock -> atomically $ do
         count <- debump rLock (resourceUsers cache)
-        when (count < 1) $ do
-          modifyTVar (resourceCache cache) (DMap.delete' rLock)
+        when (count < 1) $ modifyTVar (resourceCache cache) (DMap.delete' rLock)
       cLockSet <- readTVarIO cLockSet'
       forM_ cLockSet $ \cLock -> atomically $ do
         count <- debump cLock (contentUsers cache)
-        when (count < 1) $ do
-          modifyTVar (contentCache cache) (DMap.delete' cLock)
+        when (count < 1) $ modifyTVar (contentCache cache) (DMap.delete' cLock)
     runTransaction ::
       TransactionContext ->
-      Transaction s a ->
+      Transaction a ->
       STM (a, TransactionCommits)
     runTransaction ctx (Transaction m) = runReaderT (runStateT m (TransactionCommits mempty mempty)) ctx
 
@@ -479,7 +474,7 @@ checkUsers k (UserTracker userMap') = do
     Nothing -> pure 0
     Just count' -> readTVar count'
 
-getVar :: Var a s -> IO (TVar a) -> Transaction s (TVar a)
+getVar :: Var a -> IO (TVar a) -> Transaction (TVar a)
 getVar var createNewTVar = Transaction $ do
   TransactionContext resourceLocks _ (Cache rcache _ rusers _ _) _ <- ask
   let Var key = var
@@ -516,7 +511,7 @@ readSha digest = withByteArray digest $ \ptr -> do
 -- | Store a piece of 'Content' (which must be 'Serialize'-able) into the immutable portion of the
 -- store. A reference to the object in the store is created and returned. This reference is a hash
 -- of the content, so storing the exact same content will yield the exact same 'Ref'.
-newRef :: (Content a, Serialize a) => a -> Transaction s (Ref a s)
+newRef :: (Content a, Serialize a) => a -> Transaction (Ref a)
 newRef a = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   let encoded = Serialize.encode a
@@ -533,7 +528,7 @@ newRef a = do
         TransactionCommits v (HashMap.insert sha commits r)
   pure $ Ref (unsafeMkDKey sha)
 
-readRef :: (Serialize a, Content a) => Ref a s -> Transaction s a
+readRef :: (Serialize a, Content a) => Ref a -> Transaction a
 readRef ref = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   let Ref key = ref
@@ -550,7 +545,7 @@ readRef ref = do
             ]
       Right !a -> pure a
 
-readVar :: Serialize a => Var a s -> Transaction s a
+readVar :: Serialize a => Var a -> Transaction a
 readVar ref = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   var <- getVar ref $ do
@@ -604,7 +599,7 @@ commitValue casperDir fileName a meta' =
 varFileName :: UUID -> FilePath
 varFileName (UUID uuid) = UUID.toString $ toUUID uuid
 
-writeVar :: (Content a, Serialize a) => Var a s -> a -> Transaction s ()
+writeVar :: (Content a, Serialize a) => Var a -> a -> Transaction ()
 writeVar var a = do
   tvar <- getVar var $ newTVarIO a
   liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
@@ -629,7 +624,7 @@ newVar' casperDir a = loop
           tvar <- newTVarIO a
           pure (uuid, tvar)
 
-newVar :: (Content a, Serialize a) => a -> Transaction s (Var a s)
+newVar :: (Content a, Serialize a) => a -> Transaction (Var a)
 newVar a = do
   TransactionContext _ _ (Cache rcache _ _ _ _) casperDir <- Transaction ask
   (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a

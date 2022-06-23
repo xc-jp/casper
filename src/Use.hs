@@ -17,34 +17,34 @@ import Data.Serialize (Serialize)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 
-data Root s = Root [Var (Foo s) s] [Var (Bar s) s]
+data Root = Root [Var Foo] [Var Bar]
   deriving stock (Generic)
   deriving (Content)
   deriving anyclass (FromJSON, ToJSON)
-  deriving (Serialize) via WrapAeson (Root s)
+  deriving (Serialize) via WrapAeson Root
 
-data Foo s = Foo
-  { mi :: Var Int s,
-    _mli :: Var [Int] s,
-    lmi :: [Var Int s],
-    rec :: Var (Foo s) s,
-    recs :: Var [Foo s] s,
+data Foo = Foo
+  { mi :: Var Int,
+    _mli :: Var [Int],
+    lmi :: [Var Int],
+    rec :: Var Foo,
+    recs :: Var [Foo],
     val :: Int
   }
   deriving stock (Generic)
   deriving anyclass (FromJSON, ToJSON)
   deriving (Typeable, Content, Eq, Show)
-  deriving (Serialize) via WrapAeson (Foo s)
+  deriving (Serialize) via WrapAeson Foo
 
-data Bar s = Bar
+data Bar = Bar
   { barbie :: Int,
-    ken :: Var (Bar s) s
+    ken :: Var Bar
   }
 
 -- >>> import qualified Data.Serialize as Serialize
 -- >>> let bytes = Serialize.runPut (Serialize.put exampleFoo)
 -- >>> bytes
--- >>> let exampleFoo' = Serialize.runGet Serialize.get bytes :: Either String (Foo s)
+-- >>> let exampleFoo' = Serialize.runGet Serialize.get bytes :: Either String (Foo)
 -- >>> let exampleFoo'' = fmap (\f -> f {val = 3}) exampleFoo'
 -- >>> Right exampleFoo == exampleFoo'
 -- >>> Right exampleFoo == exampleFoo''
@@ -55,7 +55,7 @@ data Bar s = Bar
 -- False
 -- Right (Foo {mi = 00000000-0000-0000-0000-000000000000, _mli = 00000000-0000-0000-0000-000000000000, lmi = [00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000], rec = 00000000-0000-0000-0000-000000000000, recs = 00000000-0000-0000-0000-000000000000, val = 2})
 -- Foo {mi = 00000000-0000-0000-0000-000000000000, _mli = 00000000-0000-0000-0000-000000000000, lmi = [00000000-0000-0000-0000-000000000000,00000000-0000-0000-0000-000000000000], rec = 00000000-0000-0000-0000-000000000000, recs = 00000000-0000-0000-0000-000000000000, val = 2}
-exampleFoo :: Foo s
+exampleFoo :: Foo
 exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 
 -- >>> show fakeRef
@@ -69,10 +69,9 @@ exampleFoo = Foo fakeVar fakeVar [fakeVar, fakeVar] fakeVar fakeVar 2
 -- Right AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 someFunc :: IO Int
 someFunc =
-  openStore "/dev/null" (Root [] []) $ \rootVar -> do
-    transact $ do
-      (Root ls _) <- readVar rootVar
-      loop ls 0
+  openStore "/dev/null" (Root [] []) $ \rootVar -> transact $ do
+    (Root ls _) <- readVar rootVar
+    loop ls 0
   where
     loop [] z = pure z
     loop (l : ls) z = do

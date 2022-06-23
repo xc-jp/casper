@@ -14,12 +14,9 @@ accessible by multiple threads, or if multiple processes were to access
 a single Casper store.
 
 The `openStore` function is the entry point to the Casper data store, which
-creates a handle to the store and evaluates transaction on it. The `Store` data
-type itself, and all types stored within (such as `Ref` and `Var`) have an `s`
-type variable which serves the same purpose as the `s` type variable of the
-`Control.Monad.ST.ST` type: to prevent to limit the scope of what the stateful
-actions are allowed to update. It is expected that a Casper store will be
-opened with `openStore` only **once per process**, at process initialization.
+creates a handle to the store and evaluates transaction on it.  It is expected
+that a Casper store will be opened with `openStore` only **once per process**,
+at process initialization.
 
 Casper allows you to write any Haskell data into the store provided you can
 serialize them and list all other pieces of data they refer to. This is done
@@ -31,9 +28,7 @@ collection.
 
 The `root` data type is stored into a single object in the data store, and may
 contain references ('Ref' and 'Var') to other objects. The transitive closure
-of the references starting in this `root` object is the state of the store. The
-`root` type must take a type argument `s` to tie its references to the lifetime
-of the 'Store'.
+of the references starting in this `root` object is the state of the store.
 
 Casper content is stored in plain files and serialized to `ByteString`s before
 writing to the files in the store. The `Casper` module provides a `WrapAeson`
@@ -52,26 +47,25 @@ import GHC.Generics (Generic)
 import Data.Aeson (FromJSON, ToJSON) -- from the "aeson" package
 import Data.Serialize (Serialize) -- from the "cereal" package
 
-data Root s
+data Root
     = Root
       { ...
       }
     deriving stock (Generic)
     deriving (Content)
     deriving anyclass (FromJSON, ToJSON)
-    deriving (Serialize) via WrapAeson (Root s)
+    deriving (Serialize) via WrapAeson (Root)
 
-emptyRoot :: Root s
-emptyRoot = Root{ ... }
+initialRoot :: Root
+initialRoot = Root{ ... }
 
 main :: IO ()
 main = do
     ...
-    openStore "/path/to/store" emptyRoot $ \ currentRoot -> do
-       store <- getStore
-       liftIO . forkIO . forever . runCasperT store $ do
+    openStore "/path/to/store" initialRoot $ \currentRoot -> do
+       fork (pure currentRoot) $ \root -> do
             -- read/write operations on the Casper store
             item <- hReadIO stdin -- Take some input, parse it
-            writeVar currentRoot item -- store the item we got from stdin
+            writeVar root item -- store the item we got from stdin
         ...
 ```

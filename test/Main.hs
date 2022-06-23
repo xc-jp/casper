@@ -21,13 +21,13 @@ import Test.Tasty.Hspec (testSpecs)
 
 type TestString = Casper.RawData
 
-newtype TrivialTestType s = TrivialTestType [Casper.Ref TestString s]
+newtype TrivialTestType = TrivialTestType [Casper.Ref TestString]
   deriving stock (Generic)
   deriving (Casper.Content)
   deriving anyclass (FromJSON, ToJSON)
-  deriving (Serialize) via Casper.WrapAeson (TrivialTestType s)
+  deriving (Serialize) via Casper.WrapAeson (TrivialTestType)
 
-initTrivial :: TrivialTestType s
+initTrivial :: TrivialTestType
 initTrivial = TrivialTestType []
 
 fixedTestStorePath :: Maybe FilePath
