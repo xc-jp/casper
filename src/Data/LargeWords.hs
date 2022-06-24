@@ -2,7 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 
-module LargeWords where
+module Data.LargeWords where
 
 import Data.Hashable (Hashable)
 import Data.Word (Word64)

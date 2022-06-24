@@ -3,4 +3,4 @@ cradle:
     - path: "src/"
       component: "lib:casper"
     - path: "test/"
-      component: "casper:casper-spec"
+      component: "casper:casper-tests"

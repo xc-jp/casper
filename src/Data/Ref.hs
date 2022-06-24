@@ -1,18 +1,18 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Ref where
+module Data.Ref where
 
-import DMap (DKey (..), unsafeMkDKey)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Char8 as Char8
+import Data.DMap (DKey (..), unsafeMkDKey)
 import Data.Hashable (Hashable)
+import Data.LargeWords (Word256 (..))
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
 import qualified Data.Text.Encoding as Text
-import LargeWords (Word256 (..))
 
 newtype Ref a = Ref (DKey SHA a)
   deriving (Eq, Ord)

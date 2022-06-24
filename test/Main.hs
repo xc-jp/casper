@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -17,15 +16,13 @@ import Test.Hspec (Spec, example, it)
 import Test.Tasty (TestTree, defaultMain, testGroup)
 import Test.Tasty.Hspec (testSpecs)
 
-----------------------------------------------------------------------------------------------------
-
 type TestString = Casper.RawData
 
 newtype TrivialTestType = TrivialTestType [Casper.Ref TestString]
   deriving stock (Generic)
   deriving (Casper.Content)
   deriving anyclass (FromJSON, ToJSON)
-  deriving (Serialize) via Casper.WrapAeson (TrivialTestType)
+  deriving (Serialize) via Casper.WrapAeson TrivialTestType
 
 initTrivial :: TrivialTestType
 initTrivial = TrivialTestType []
@@ -56,9 +53,7 @@ simpleTests =
                   error $ "expecting ref to contain: " <> show [hello] <> ", got " <> show values
 
 main :: IO ()
-main =
-  testGroup "Casper"
-    <$> sequence
-      [ testGroup "Simple Tests" <$> testSpecs simpleTests
-      ]
-    >>= defaultMain
+main = do
+  specs <- testSpecs simpleTests
+  let tests = testGroup "Casper" [testGroup "Simple Tests" specs]
+  defaultMain tests

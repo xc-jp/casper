@@ -15,11 +15,11 @@ extra-source-files: README.md
 library
   exposed-modules:
     Casper
-    Content
-    DMap
-    LargeWords
-    Ref
-    Var
+    Casper.Content
+    Data.DMap
+    Data.LargeWords
+    Data.Ref
+    Data.Var
 
   other-modules:    Use
   hs-source-dirs:   src

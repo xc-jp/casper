@@ -49,14 +49,16 @@ module Casper
     collectGarbage,
 
     -- * Type classes and data types
-    Content (..),
+    Content.Content (..),
+    noRefs,
     WrapAeson (..),
     RawData (..),
     LazyRawData (..),
   )
 where
 
-import Content
+import Casper.Content
+import qualified Casper.Content as Content
 import Control.Applicative (liftA2)
 import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.MVar
@@ -70,7 +72,6 @@ import Control.Monad.Identity (Identity)
 import Control.Monad.Reader
 import Control.Monad.State
 import Crypto.Hash (Digest, SHA256 (SHA256), hash, hashWith)
-import DMap
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -80,6 +81,8 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
+import Data.DMap (DMap)
+import qualified Data.DMap as DMap
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HashMap
@@ -87,6 +90,8 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
 import Data.Hashable (Hashable)
 import Data.Kind (Type)
+import Data.LargeWords (Word128 (..), Word256 (..))
+import Data.Ref
 import Data.Serialize (Serialize (..))
 import qualified Data.Serialize as Serialize
 import Data.Set (Set)
@@ -96,18 +101,17 @@ import qualified Data.Text.Encoding as Text
 import Data.Typeable
 import qualified Data.UUID as UUID
 import Data.UUID.V4 (nextRandom)
+import Data.Var (UUID, Var (..), fakeVar, fromUUID, toUUID, varUuid')
 import Foreign (peek)
 import Foreign.Ptr (plusPtr)
 import GHC.Conc (unsafeIOToSTM)
 import GHC.Generics
 import GHC.IO.Exception (IOErrorType (UserError))
-import LargeWords (Word128 (..), Word256 (..))
-import Ref
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile, renameFile)
+import System.Exit (die)
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile, openTempFile)
 import Text.Read (readEither)
-import Var
 
 newtype TransactionID = TransactionID Word
 
@@ -260,11 +264,11 @@ fork transaction runner = CasperT $
     -- collected before the bump happens.
     pin (Store c _) t = do
       var@(Var key) <- t
-      let uuid = unDKey key
+      let uuid = DMap.unDKey key
       liftSTM $ bump uuid (resourceUsers c)
       pure var
     unpin (Store c _) (Var key) =
-      let uuid = unDKey key
+      let uuid = DMap.unDKey key
        in void . atomically $ debump uuid (resourceUsers c)
 
 -- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
@@ -367,15 +371,15 @@ openStore casperDir initial runner = do
       case result of
         Left err -> liftIO $ throwIO (userError err)
         Right (CasperManifest _ rootId) -> do
-          let rootUUID = UUID $ fromUUID rootId
-          let rootVar = Var $ unsafeMkDKey rootUUID
+          let rootUUID = fromUUID rootId
+          let rootVar = Var $ DMap.unsafeMkDKey rootUUID
           -- retain the root resource
           liftIO $ atomically $ bump rootUUID (resourceUsers cache)
           runCasperT (Store cache casperDir) (runner rootVar)
     else do
       rootId <- liftIO nextRandom
-      let rootUUID = UUID $ fromUUID rootId
-      let rootVar = Var $ unsafeMkDKey rootUUID
+      let rootUUID = fromUUID rootId
+      let rootVar = Var $ DMap.unsafeMkDKey rootUUID
       runCasperT (Store cache casperDir) (transact (writeVar rootVar initial))
       liftIO $ Aeson.encodeFile manifest (CasperManifest "1" rootId)
       -- retain the root resource
@@ -478,7 +482,7 @@ getVar :: Var a -> IO (TVar a) -> Transaction (TVar a)
 getVar var createNewTVar = Transaction $ do
   TransactionContext resourceLocks _ (Cache rcache _ rusers _ _) _ <- ask
   let Var key = var
-      uuid = unDKey key
+      uuid = DMap.unDKey key
   lift . lift . safeIOToSTM $ do
     atomically $ do
       hasLock <- HashSet.member uuid <$> readTVar resourceLocks
@@ -526,18 +530,18 @@ newRef a = do
     Transaction $
       modify $ \(TransactionCommits v r) ->
         TransactionCommits v (HashMap.insert sha commits r)
-  pure $ Ref (unsafeMkDKey sha)
+  pure $ Ref (DMap.unsafeMkDKey sha)
 
 readRef :: (Serialize a, Content a) => Ref a -> Transaction a
 readRef ref = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   let Ref key = ref
-  let sha = unDKey key
+  let sha = DMap.unDKey key
   liftSTM . safeIOToSTM $ do
     bs <- ByteString.readFile (casperDir </> "objects" </> show sha)
     case Serialize.decode bs of
       Left err ->
-        error $
+        die $
           unwords
             [ "corrupt content for",
               show sha <> ":",
@@ -549,11 +553,11 @@ readVar :: Serialize a => Var a -> Transaction a
 readVar ref = do
   TransactionContext _ _ _ casperDir <- Transaction ask
   var <- getVar ref $ do
-    let UUID uuid = unDKey $ unVar ref
-    bs <- readVarFromDisk casperDir (UUID uuid)
+    let uuid = DMap.unDKey $ unVar ref
+    bs <- readVarFromDisk casperDir uuid
     case Serialize.decode bs of
       Left err ->
-        error $
+        die $
           unwords
             [ "corrupt content for",
               show (toUUID uuid) <> ":",
@@ -597,7 +601,7 @@ commitValue casperDir fileName a meta' =
    in (commitContent, commitMeta)
 
 varFileName :: UUID -> FilePath
-varFileName (UUID uuid) = UUID.toString $ toUUID uuid
+varFileName uuid = UUID.toString $ toUUID uuid
 
 writeVar :: (Content a, Serialize a) => Var a -> a -> Transaction ()
 writeVar var a = do
@@ -605,17 +609,17 @@ writeVar var a = do
   liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
   TransactionContext _ _ _ casperDir <- Transaction ask
   let Var key = var
-  let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
+  let commits = commitValue casperDir (varFileName (DMap.unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
-      TransactionCommits (HashMap.insert (varUuid var) commits v) r
+      TransactionCommits (HashMap.insert (varUuid' var) commits v) r
 
 newVar' :: FilePath -> a -> IO (UUID, TVar a)
 newVar' casperDir a = loop
   where
     loop = do
       u <- nextRandom
-      let uuid = UUID $ fromUUID u
+      let uuid = fromUUID u
       -- ensure our UUID is not already in use
       exists <- doesFileExist (casperDir </> "objects" </> varFileName uuid)
       if exists
@@ -628,14 +632,14 @@ newVar :: (Content a, Serialize a) => a -> Transaction (Var a)
 newVar a = do
   TransactionContext _ _ (Cache rcache _ _ _ _) casperDir <- Transaction ask
   (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a
-  let var = Var (unsafeMkDKey uuid)
+  let var = Var (DMap.unsafeMkDKey uuid)
   let Var key = var
   -- add the variable to the resource cache
   void . liftSTM $ modifyTVar rcache (DMap.insert tvar key)
-  let commits = commitValue casperDir (varFileName (unDKey key)) (Serialize.encode a) (meta a)
+  let commits = commitValue casperDir (varFileName (DMap.unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
-      TransactionCommits (HashMap.insert (varUuid var) commits v) r
+      TransactionCommits (HashMap.insert (varUuid' var) commits v) r
   pure var
 
 data ContentMeta = ContentMeta [UUID] [SHA]
@@ -646,7 +650,7 @@ instance Serialize ContentMeta where
 
 meta :: Content a => a -> ContentMeta
 meta a =
-  let (vars, refs') = unzip $ Content.refs (\(Var key) -> ([unDKey key], [])) (\(Ref key) -> ([], [unDKey key])) a
+  let (vars, refs') = unzip $ Content.refs (\(Var key) -> ([DMap.unDKey key], [])) (\(Ref key) -> ([], [DMap.unDKey key])) a
    in ContentMeta (concat vars) (concat refs')
 
 -- | Assures that the IO computation finalizes no matter if the STM transaction

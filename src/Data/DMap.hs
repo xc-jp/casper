@@ -4,7 +4,7 @@
 
 -- | The design of this module is inspired by https://hackage.haskell.org/package/HMap.
 -- This module is more obviously unsound that HMap is, but we more clearly outline the conditions for safety, and put the onus of maintaining them on the user.
-module DMap
+module Data.DMap
   ( DMap,
     DKey (unDKey),
     unsafeMkDKey,

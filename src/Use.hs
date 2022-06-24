@@ -40,6 +40,8 @@ data Bar = Bar
   { barbie :: Int,
     ken :: Var Bar
   }
+  deriving (Generic, Content, FromJSON, ToJSON)
+  deriving (Serialize) via WrapAeson Bar
 
 -- >>> import qualified Data.Serialize as Serialize
 -- >>> let bytes = Serialize.runPut (Serialize.put exampleFoo)

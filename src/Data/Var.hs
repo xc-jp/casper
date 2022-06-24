@@ -1,27 +1,28 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Var where
+module Data.Var where
 
 import Control.Concurrent.STM (TVar)
-import DMap (DKey (..), unsafeMkDKey)
 import Data.Aeson (FromJSON, ToJSON)
 import qualified Data.Aeson as Aeson
+import Data.Bifunctor (first)
+import Data.DMap (DKey (..), unsafeMkDKey)
 import Data.Hashable (Hashable)
+import Data.LargeWords (Word128 (..))
 import Data.Serialize (Serialize)
 import qualified Data.Serialize as Serialize
 import qualified Data.UUID as UUID
-import LargeWords (Word128 (..))
 
 newtype UUID = UUID Word128
   deriving newtype (Eq, Ord, Hashable)
 
 instance Show UUID where
-  show (UUID w) = show $ toUUID w
+  show u = show $ toUUID u
 
 instance Read UUID where
   readsPrec d x =
-    fmap (\(u, s) -> (UUID (fromUUID u), s)) (readsPrec d x)
+    fmap (first fromUUID) (readsPrec d x)
 
 instance Serialize UUID where
   put (UUID (Word128 a b)) = Serialize.put a <> Serialize.put b
@@ -45,20 +46,21 @@ instance FromJSON (Var a) where
     txt <- Aeson.parseJSON v
     case UUID.fromText txt of
       Nothing -> fail (show txt <> " isn't a valid UUID")
-      Just a -> pure $ Var $ unsafeMkDKey $ UUID (fromUUID a)
+      Just a -> pure $ Var $ unsafeMkDKey $ fromUUID a
 
-toUUID :: Word128 -> UUID.UUID
-toUUID (Word128 a b) = UUID.fromWords64 a b
+toUUID :: UUID -> UUID.UUID
+toUUID (UUID (Word128 a b)) = UUID.fromWords64 a b
 
-varUuid :: Var a -> UUID
-varUuid = unDKey . unVar
-
-fromUUID :: UUID.UUID -> Word128
-fromUUID u = Word128 a b
+fromUUID :: UUID.UUID -> UUID
+fromUUID u = UUID $ Word128 a b
   where
     (a, b) = UUID.toWords64 u
 
+varUuid :: Var a -> UUID.UUID
+varUuid = toUUID . varUuid'
+
+varUuid' :: Var a -> UUID
+varUuid' = unDKey . unVar
+
 instance ToJSON (Var a) where
-  toJSON (Var key) =
-    let UUID w = unDKey key
-     in Aeson.String (UUID.toText (toUUID w))
+  toJSON (Var key) = Aeson.String (UUID.toText (toUUID (unDKey key)))

@@ -5,11 +5,12 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Content where
+module Casper.Content where
 
-import GHC.Generics
-import Ref (Ref)
-import Var (Var)
+import Data.Ref (Ref)
+import Data.Serialize (Serialize)
+import Data.Var (Var)
+import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (..), type (:+:) (..))
 
 -- | This provides the 'refs' method for traversing over a data type and extracting all of the
 -- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
@@ -21,7 +22,7 @@ import Var (Var)
 -- by other processes. By not providing the 'Content' instance it's less likely
 -- that you'll use this serialization method by mistake since you can't use
 -- 'writeVar' and 'newRef'.
-class Content a where
+class Serialize a => Content a where
   refs ::
     (forall r. Var r -> ref) ->
     (forall r. Ref r -> ref) ->
@@ -32,8 +33,6 @@ class Content a where
     (forall r. Ref r -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
-
--- TODO: should 'Content' have 'Serialize' as a superclass constraint again?
 
 class GContent a where
   grefs ::
@@ -58,9 +57,9 @@ instance GContent U1 where grefs = noRefs
 
 instance GContent V1 where grefs = noRefs
 
-instance Content (Ref a) where refs _ fc c = pure $ fc c
+instance Content a => Content (Ref a) where refs _ fc c = pure $ fc c
 
-instance Content (Var a) where refs fr _ r = pure $ fr r
+instance Content a => Content (Var a) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 
