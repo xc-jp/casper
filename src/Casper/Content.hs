@@ -21,6 +21,7 @@ import Data.Serialize (Serialize)
 import qualified Data.Set as Set
 import Data.Tree (Tree)
 import Data.Var (Var)
+import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (..), type (:+:) (..))
 
@@ -34,7 +35,10 @@ import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (
 -- by other processes. By not providing the 'Content' instance it's less likely
 -- that you'll use this serialization method by mistake since you can't use
 -- 'writeVar' and 'newRef'.
-class Serialize a => Content a where
+--
+-- 'Serialize' is not a superclass of 'Content' because there's no instance for
+-- 'Serialize' 'Void'.
+class Content a where
   refs ::
     (forall r. Var r -> ref) ->
     (forall r. Ref r -> ref) ->
@@ -72,9 +76,11 @@ instance GContent U1 where grefs = noRefs
 
 instance GContent V1 where grefs = noRefs
 
-instance Content a => Content (Ref a) where refs _ fc c = pure $ fc c
+instance Content Void
 
-instance Content a => Content (Var a) where refs fr _ r = pure $ fr r
+instance (Serialize a, Content a) => Content (Ref a) where refs _ fc c = pure $ fc c
+
+instance (Serialize a, Content a) => Content (Var a) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 
