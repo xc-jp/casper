@@ -54,6 +54,9 @@ module Casper
     WrapAeson (..),
     RawData (..),
     LazyRawData (..),
+
+    -- * Re-exports
+    Serialize (..),
   )
 where
 
