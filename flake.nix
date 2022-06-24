@@ -23,6 +23,7 @@
         defaultPackage = pkgs.hsPkgs.casper;
         devShell = pkgs.hsPkgs.shellFor {
           packages = ps: [ ps.casper ];
+          withHoogle = true;
           buildInputs = [
             pkgs.ormolu
             pkgs.hlint
