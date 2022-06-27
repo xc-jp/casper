@@ -32,6 +32,10 @@ module Casper
     writeVar,
     newVar,
 
+    -- * Retain variables
+    retain,
+    fork,
+
     -- * References to immutable content
     Ref,
     fakeRef,
@@ -44,7 +48,6 @@ module Casper
     openStore,
     getStore,
     runCasperT,
-    fork,
     liftSTM,
     collectGarbage,
 
