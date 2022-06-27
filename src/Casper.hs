@@ -274,6 +274,27 @@ fork transaction runner = CasperT $
       let uuid = DMap.unDKey key
        in void . atomically $ debump uuid (resourceUsers c)
 
+-- | Provided a transaction evaluating to a 'Var', retain the 'Var' in the same
+-- thread while the continuation is being evaluated.
+--
+-- It is not safe to leave any references to the 'Var' in the return type 'b'.
+retain :: (MonadMask m, MonadIO m) => Transaction (Var a) -> (Var a -> CasperT m b) -> CasperT m b
+retain transaction runner = CasperT $
+  ReaderT $ \store -> do
+    let CasperT (ReaderT go) = transact (pin store transaction)
+    runCasperT store $ bracket (go store) (unpin store) runner
+  where
+    -- We bump _within_ the transaction to prevent the variable to be garbage
+    -- collected before the bump happens.
+    pin (Store c _) t = do
+      var@(Var key) <- t
+      let uuid = DMap.unDKey key
+      liftSTM $ bump uuid (resourceUsers c)
+      pure var
+    unpin (Store c _) (Var key) =
+      let uuid = DMap.unDKey key
+       in void . liftIO . atomically $ debump uuid (resourceUsers c)
+
 -- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
 -- the bytes.
 newtype RawData = RawData {unRawData :: ByteString}
