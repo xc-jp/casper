@@ -192,7 +192,7 @@ newtype Transaction a = Transaction
   deriving (Functor, Monad, Applicative)
 
 newtype CasperT m a = CasperT (ReaderT Store m a)
-  deriving (Functor, Monad, Applicative, MonadIO)
+  deriving (Functor, Monad, Applicative, MonadIO, MonadTrans)
 
 deriving instance MonadMask m => MonadMask (CasperT m)
 
