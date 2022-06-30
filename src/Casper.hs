@@ -209,13 +209,18 @@ collectGarbage = CasperT $
       os <- listDirectory (casperDir </> "objects")
       ms <- listDirectory (casperDir </> "meta")
       pure (os, ms)
-    let UserTracker inUse = resourceUsers cache
-    inUse' <- liftIO $ readTVarIO inUse
-    let roots = HashMap.keys inUse'
+    let UserTracker usedVars = resourceUsers cache
+    usedVars' <- liftIO $ readTVarIO usedVars
+    let uuids0 = HashMap.keys usedVars'
+    let UserTracker usedRefs = contentUsers cache
+    usedRefs' <- liftIO $ readTVarIO usedRefs
+    let shas0 = HashMap.keys usedRefs'
     liftIO $ atomically $ writeTVar (gcLock cache) True
     (uuids, shas) <-
-      liftIO $
-        foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.empty, HashSet.empty) roots
+      liftIO $ do
+        (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.empty, HashSet.empty) uuids0
+        (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') shas0
+        pure (uuids'', shas'')
     liftIO $ atomically $ writeTVar (gcLock cache) False
     liftIO $ deleteInaccessible uuids shas (casperDir </> "objects") objects
     liftIO $ deleteInaccessible uuids shas (casperDir </> "meta") metas
