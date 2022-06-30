@@ -258,45 +258,52 @@ deleteInaccessible uuids shas directory =
           Right u -> unless (HashSet.member u uuids) (removeFile (directory </> fp))
     )
 
--- | Provided a transaction evaluating to a 'Var', fork a thread where that
--- 'Var' is retained at least as long the thread is running.
-fork :: (MonadIO m, MonadMask m) => Transaction (Var a) -> (Var a -> CasperT IO ()) -> CasperT m ThreadId
-fork transaction runner = CasperT $
+retainWith :: (MonadMask n, MonadIO n, Content a) => (Store -> CasperT n b -> m c) -> Transaction a -> (a -> CasperT n b) -> CasperT m c
+retainWith f transaction runner = CasperT $
   ReaderT $ \store -> do
     let CasperT (ReaderT go) = transact (pin store transaction)
-    liftIO . forkIO $ bracket (go store) (unpin store) (runCasperT store . runner)
+    f store $ bracket (go store) (unpin store) (runner . fst)
   where
-    -- We bump _within_ the transaction to prevent the variable to be garbage
+    -- We bump _within_ the transaction to prevent the content to be garbage
     -- collected before the bump happens.
     pin (Store c _) t = do
-      var@(Var key) <- t
-      let uuid = DMap.unDKey key
+      a <- t
+      refs' <- sequence (refs (fmap Left . pinVar c) (fmap Right . pinRef c) a)
+      pure (a, refs')
+    unpin (Store c _) (_, refs') =
+      void . liftIO . atomically $ traverse (either (unpinVar c) (unpinRef c)) refs'
+
+    pinVar :: Cache -> Var r -> Transaction UUID
+    pinVar c (Var key) = do
       liftSTM $ bump uuid (resourceUsers c)
-      pure var
-    unpin (Store c _) (Var key) =
-      let uuid = DMap.unDKey key
-       in void . atomically $ debump uuid (resourceUsers c)
+      pure uuid
+      where
+        uuid = DMap.unDKey key
+
+    pinRef :: Cache -> Ref r -> Transaction SHA
+    pinRef c (Ref key) = do
+      liftSTM $ bump sha (contentUsers c)
+      pure sha
+      where
+        sha = DMap.unDKey key
+
+    unpinVar :: Cache -> UUID -> STM ()
+    unpinVar c uuid = void $ debump uuid (resourceUsers c)
+
+    unpinRef :: Cache -> SHA -> STM ()
+    unpinRef c sha = void $ debump sha (contentUsers c)
+
+-- | Provided a transaction evaluating to a 'Var', fork a thread where that
+-- 'Var' is retained at least as long the thread is running.
+fork :: (MonadIO m, Content a) => Transaction a -> (a -> CasperT IO ()) -> CasperT m ThreadId
+fork = retainWith (\store ma -> liftIO . forkIO $ runCasperT store ma)
 
 -- | Provided a transaction evaluating to a 'Var', retain the 'Var' in the same
 -- thread while the continuation is being evaluated.
 --
 -- It is not safe to leave any references to the 'Var' in the return type 'b'.
-retain :: (MonadMask m, MonadIO m) => Transaction (Var a) -> (Var a -> CasperT m b) -> CasperT m b
-retain transaction runner = CasperT $
-  ReaderT $ \store -> do
-    let CasperT (ReaderT go) = transact (pin store transaction)
-    runCasperT store $ bracket (go store) (unpin store) runner
-  where
-    -- We bump _within_ the transaction to prevent the variable to be garbage
-    -- collected before the bump happens.
-    pin (Store c _) t = do
-      var@(Var key) <- t
-      let uuid = DMap.unDKey key
-      liftSTM $ bump uuid (resourceUsers c)
-      pure var
-    unpin (Store c _) (Var key) =
-      let uuid = DMap.unDKey key
-       in void . liftIO . atomically $ debump uuid (resourceUsers c)
+retain :: (MonadMask m, MonadIO m, Content a) => Transaction a -> (a -> CasperT m b) -> CasperT m b
+retain = retainWith runCasperT
 
 -- | This is a wrapper around a 'ByteString' that serizlizes content without a length prefix before
 -- the bytes.
