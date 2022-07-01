@@ -452,29 +452,29 @@ transact ::
   Transaction a ->
   CasperT m a
 transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket enter (exit cache) $ \(rLockSet', cLockSet') -> do
-  (a, TransactionCommits ref var) <-
-    let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
-     in liftIO . atomically . runTransaction ctx $ transaction
-  liftIO $ do
-    tempRefs <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) ref
-    tempVars <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) var
-    traverse_
-      ( \(k, (x, y)) ->
-          let (fx, fy) = (tempRefs HashMap.! k)
-           in moveTemp x fx *> moveTemp y fy
-      )
-      (HashMap.toList ref)
-    -- wait for GC to finish before we update any file
-    let waitForGC = atomically $ do
-          locked <- readTVar (gcLock cache)
-          when locked retry
-    traverse_
-      ( \(k, (x, y)) ->
-          let (fx, fy) = (tempVars HashMap.! k)
-           in waitForGC *> moveTemp x fx *> moveTemp y fy
-      )
-      (HashMap.toList var)
-  pure a
+  let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
+   in liftIO . atomically $ do
+        (a, TransactionCommits ref var) <- runTransaction ctx transaction
+        safeIOToSTM $ do
+          tempRefs <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) ref
+          tempVars <- traverse (\(x, y) -> liftA2 (,) (writeTemp x) (writeTemp y)) var
+          traverse_
+            ( \(k, (x, y)) ->
+                let (fx, fy) = (tempRefs HashMap.! k)
+                 in moveTemp x fx *> moveTemp y fy
+            )
+            (HashMap.toList ref)
+          -- wait for GC to finish before we update any file
+          let waitForGC = atomically $ do
+                locked <- readTVar (gcLock cache)
+                when locked retry
+          traverse_
+            ( \(k, (x, y)) ->
+                let (fx, fy) = (tempVars HashMap.! k)
+                 in waitForGC *> moveTemp x fx *> moveTemp y fy
+            )
+            (HashMap.toList var)
+        pure a
   where
     enter = liftIO $ liftA2 (,) (newTVarIO mempty) (newTVarIO mempty)
     exit cache (rLockSet', cLockSet') = liftIO $ do
@@ -622,7 +622,7 @@ commitValue casperDir fileName a meta' =
         WritePair
           ( do
               createDirectoryIfMissing True (casperDir </> "tmp")
-              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "varXXXXXX"
+              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "var"
               ByteString.hPutStr h a
               hClose h
               pure fp
@@ -634,7 +634,7 @@ commitValue casperDir fileName a meta' =
       commitMeta =
         WritePair
           ( do
-              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "metaXXXXXX"
+              (fp, h) <- openBinaryTempFile (casperDir </> "tmp") "meta"
               ByteString.hPutStr h (Serialize.encode meta')
               hClose h
               pure fp
