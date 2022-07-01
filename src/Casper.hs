@@ -10,6 +10,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
@@ -108,6 +109,7 @@ import Data.Typeable
 import qualified Data.UUID as UUID
 import Data.UUID.V4 (nextRandom)
 import Data.Var (UUID, Var (..), fakeVar, fromUUID, toUUID, varUuid')
+import Data.Void (Void, absurd)
 import Foreign (peek)
 import Foreign.Ptr (plusPtr)
 import GHC.Conc (unsafeIOToSTM)
@@ -155,6 +157,10 @@ instance (FromJSON a, ToJSON a) => Serialize (WrapAeson a) where
   get = do
     i <- Serialize.remaining
     Serialize.getBytes i >>= either fail (pure . WrapAeson) . Aeson.eitherDecodeStrict'
+
+instance Serialize Void where
+  put = absurd
+  get = fail "Attempt to decode Void"
 
 data TransactionCommits = TransactionCommits
   { varCommits :: HashMap UUID (WritePair, WritePair),
