@@ -17,7 +17,6 @@ import Data.Ratio (Ratio)
 import qualified Data.Ratio as Ratio
 import Data.Ref (Ref)
 import Data.Sequence (Seq)
-import Data.Serialize (Serialize)
 import qualified Data.Set as Set
 import Data.Tree (Tree)
 import Data.Var (Var)
@@ -78,9 +77,9 @@ instance GContent V1 where grefs = noRefs
 
 instance Content Void
 
-instance (Serialize a, Content a) => Content (Ref a) where refs _ fc c = pure $ fc c
+instance (Content a) => Content (Ref a) where refs _ fc c = pure $ fc c
 
-instance (Serialize a, Content a) => Content (Var a) where refs fr _ r = pure $ fr r
+instance (Content a) => Content (Var a) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 
