@@ -225,8 +225,7 @@ collectGarbage = CasperT $
     (uuids, shas) <-
       liftIO $ do
         (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.empty, HashSet.empty) uuids0
-        (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') shas0
-        pure (uuids'', shas'')
+        foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') shas0
     liftIO $ atomically $ writeTVar (gcLock cache) False
     liftIO $ deleteInaccessible uuids shas (casperDir </> "objects") objects
     liftIO $ deleteInaccessible uuids shas (casperDir </> "meta") metas
@@ -237,9 +236,8 @@ sweepUUID casperDir uuids shas uuid =
     then pure (uuids, shas)
     else do
       ContentMeta luuids lshas <- readMetaFile (casperDir </> "meta" </> varFileName uuid)
-      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (uuids, shas) luuids
-      (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
-      pure (uuids'', shas'')
+      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (HashSet.insert uuid uuids, shas) luuids
+      foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
 
 sweepSHA :: FilePath -> HashSet UUID -> HashSet SHA -> SHA -> IO (HashSet UUID, HashSet SHA)
 sweepSHA casperDir uuids shas sha =
@@ -247,9 +245,8 @@ sweepSHA casperDir uuids shas sha =
     then pure (uuids, shas)
     else do
       ContentMeta luuids lshas <- readMetaFile (casperDir </> "meta" </> show sha)
-      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (uuids, shas) luuids
-      (uuids'', shas'') <- foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
-      pure (uuids'', shas'')
+      (uuids', shas') <- foldM (\(us, ss) u -> sweepUUID casperDir us ss u) (uuids, HashSet.insert sha shas) luuids
+      foldM (\(us, ss) s -> sweepSHA casperDir us ss s) (uuids', shas') lshas
 
 readMetaFile :: FilePath -> IO ContentMeta
 readMetaFile fp = do
@@ -259,9 +256,9 @@ readMetaFile fp = do
     Right c -> pure c
 
 deleteInaccessible :: HashSet UUID -> HashSet SHA -> FilePath -> [FilePath] -> IO ()
-deleteInaccessible uuids shas directory =
+deleteInaccessible uuids shas directory = do
   traverse_
-    ( \fp ->
+    ( \fp -> do
         case readEither fp of
           Left _ -> case readEither fp of
             Left _ -> removeFile (directory </> fp)
