@@ -11,6 +11,7 @@ import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap (IntMap)
 import Data.IntSet (IntSet)
 import Data.LargeWords (Word128, Word256)
+import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map as Map
 import Data.Monoid (All, Any, Dual, First, Last, Product, Sum)
 import Data.Ratio (Ratio)
@@ -23,6 +24,7 @@ import Data.Var (Var)
 import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
 import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (..), type (:+:) (..))
+import Numeric.Natural (Natural)
 
 -- | This provides the 'refs' method for traversing over a data type and extracting all of the
 -- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
@@ -83,6 +85,8 @@ instance (Content a) => Content (Var a) where refs fr _ r = pure $ fr r
 
 instance Content a => Content [a]
 
+instance Content a => Content (NonEmpty a)
+
 instance Content a => Content (Maybe a)
 
 instance (Ord k, Content k, Content a) => Content (Map.Map k a) where
@@ -136,6 +140,8 @@ instance (Integral a, Content a) => Content (Ratio a) where
   refs fv fr a = refs fv fr (Ratio.numerator a) <> refs fv fr (Ratio.denominator a)
 
 instance Content () where refs = noRefs
+
+instance Content Natural where refs = noRefs
 
 instance Content All where refs = noRefs
 
