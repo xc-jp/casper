@@ -17,9 +17,9 @@ library
     Casper
     Casper.Content
     Data.DMap
-    Data.LargeWords
     Data.Ref
     Data.Var
+    Util
 
   other-modules:    Use
   hs-source-dirs:   src

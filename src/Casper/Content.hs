@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeOperators #-}
 
@@ -10,7 +11,7 @@ module Casper.Content where
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap (IntMap)
 import Data.IntSet (IntSet)
-import Data.LargeWords (Word128, Word256)
+import Data.Kind (Type)
 import qualified Data.Map as Map
 import Data.Monoid (All, Any, Dual, First, Last, Product, Sum)
 import Data.Ratio (Ratio)
@@ -23,7 +24,7 @@ import Data.Tree (Tree)
 import Data.Var (Var)
 import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
-import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (..), type (:+:) (..))
+import GHC.Generics
 
 -- | This provides the 'refs' method for traversing over a data type and extracting all of the
 -- direct children for some content. 'Var's and 'Ref's that are not included in this traveral may be
@@ -38,59 +39,69 @@ import GHC.Generics (Generic (Rep, from), K1 (K1), M1 (M1), U1, V1, type (:*:) (
 --
 -- 'Serialize' is not a superclass of 'Content' because there's no instance for
 -- 'Serialize' 'Void'.
-class Content a where
+class Content (a :: Type) s where
+  -- TODO ref -> ref for efficient cats
   refs ::
-    (forall r. Var r -> ref) ->
-    (forall r. Ref r -> ref) ->
+    (forall r. Var r s -> ref) ->
+    (forall r. Ref r s -> ref) ->
     (a -> [ref])
   default refs ::
-    (Generic a, GContent (Rep a)) =>
-    (forall r. Var r -> ref) ->
-    (forall r. Ref r -> ref) ->
+    (Generic a, GContent (Rep a) s) =>
+    (forall r. Var r s -> ref) ->
+    (forall r. Ref r s -> ref) ->
     (a -> [ref])
   refs fr fc a = grefs fr fc (from a)
 
-class GContent a where
+-- * Generics
+
+class GContent a s where
   grefs ::
-    (forall r. Var r -> ref) ->
-    (forall r. Ref r -> ref) ->
+    (forall r. Var r s -> ref) ->
+    (forall r. Ref r s -> ref) ->
     (a x -> [ref])
 
-noRefs :: (forall r. Var r -> ref) -> (forall r. Ref r -> ref) -> a -> [ref]
-noRefs _ _ _ = []
+instance Content a s => GContent (K1 c a) s where grefs fr fc (K1 a) = refs fr fc a
 
-instance Content a => GContent (K1 c a) where grefs fr fc (K1 a) = refs fr fc a
+instance GContent a s => GContent (M1 i c a) s where grefs fr fc (M1 a) = grefs fr fc a
 
-instance GContent a => GContent (M1 i c a) where grefs fr fc (M1 a) = grefs fr fc a
+instance (GContent a s, GContent b s) => GContent (a :*: b) s where grefs fr fc (a :*: b) = grefs fr fc a <> grefs fr fc b
 
-instance (GContent a, GContent b) => GContent (a :*: b) where grefs fr fc (a :*: b) = grefs fr fc a <> grefs fr fc b
-
-instance (GContent a, GContent b) => GContent (a :+: b) where
+instance (GContent a s, GContent b s) => GContent (a :+: b) s where
   grefs fr fc (L1 a) = grefs fr fc a
   grefs fr fc (R1 b) = grefs fr fc b
 
-foldRefs :: (Foldable t, Content a) => (forall r. Var r -> ref) -> (forall r. Ref r -> ref) -> t a -> [ref]
-foldRefs fv fr = foldMap (refs fv fr)
+instance GContent U1 s where grefs _ _ _ = []
 
-instance GContent U1 where grefs = noRefs
+instance GContent V1 s where grefs _ _ _ = []
 
-instance GContent V1 where grefs = noRefs
+instance Content Void s
 
-instance Content Void
+instance Content a s => Content (Ref a s) s where refs _ fc c = pure $ fc c
 
-instance (Serialize a, Content a) => Content (Ref a) where refs _ fc c = pure $ fc c
+instance Content a s => Content (Var a s) s where refs fr _ r = pure $ fr r
 
-instance (Serialize a, Content a) => Content (Var a) where refs fr _ r = pure $ fr r
+-- * Helper functions
 
-instance Content a => Content [a]
+foldRefs ::
+  (Foldable f, Content a s) =>
+  (forall r. Var r s -> ref) ->
+  (forall r. Ref r s -> ref) ->
+  f a ->
+  [ref]
+foldRefs fv fr = foldr (mappend . refs fv fr) []
 
-instance Content a => Content (Maybe a)
+-- * base instances
 
-instance (Ord k, Content k, Content a) => Content (Map.Map k a) where
+instance Content a s => Content [a] s
+
+instance Content a s => Content (Maybe a) s
+
+instance (Ord k, Content k s, Content a s) => Content (Map.Map k a) s where
   refs fv fr = Map.foldMapWithKey (\k a -> refs fv fr k <> refs fv fr a)
 
-instance (Ord k, Content k) => Content (Set.Set k) where refs = foldRefs
+instance (Ord k, Content k s) => Content (Set.Set k) s where refs = foldRefs
 
+{-
 instance Content a => Content (IntMap a) where refs = foldRefs
 
 instance Content a => Content (Tree a) where refs = foldRefs
@@ -128,10 +139,6 @@ instance Content Word16 where refs = noRefs
 instance Content Word32 where refs = noRefs
 
 instance Content Word64 where refs = noRefs
-
-instance Content Word128 where refs = noRefs
-
-instance Content Word256 where refs = noRefs
 
 instance (Integral a, Content a) => Content (Ratio a) where
   refs fv fr a = refs fv fr (Ratio.numerator a) <> refs fv fr (Ratio.denominator a)
@@ -207,3 +214,4 @@ instance (Content a, Content b, Content c, Content d, Content d, Content e, Cont
         refs fv fr i,
         refs fv fr j
       ]
+-}
