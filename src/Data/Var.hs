@@ -28,7 +28,7 @@ instance Serialize UUID where
   put = Serialize.put . UUID.toWords64 . unUUID
   get = UUID . uncurry UUID.fromWords64 <$> Serialize.get
 
-newtype Var (a :: Type -> Type) (s :: k) = Var {unVar :: DKey UUID (Weak (TVar (a Void)))}
+newtype Var a (s :: k) = Var {unVar :: DKey UUID a}
   deriving (Eq, Ord)
 
 instance Show (Var a s) where show = show . unDKey . unVar

@@ -21,7 +21,7 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import System.Mem.Weak (Weak)
 
-newtype Ref a (s :: k) = Ref {unRef :: DKey SHA (Weak (TVar (a Void)))}
+newtype Ref a (s :: k) = Ref {unRef :: DKey SHA a}
   deriving newtype (Eq, Ord)
 
 instance Show (Ref a s) where

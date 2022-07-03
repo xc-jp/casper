@@ -1,6 +1,7 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RankNTypes #-}
 
 module Casper where
@@ -15,8 +16,22 @@ import Data.Var
 import Data.Void
 import GHC.Conc
 import qualified GHC.Weak as Weak
+import System.Mem.Weak (Weak)
 import Unsafe.Coerce (unsafeCoerce)
 import Util
+
+data Store s = Store
+  { rootPath :: FilePath,
+    -- TODO
+    -- The entire cache is hidden behind a single TVar.
+    -- That means that every time the cache structurally changes, any other actions are retried.
+    -- This is annoying because the cache is involed in every transactiont.
+    -- Doubly so because conceptually, most transactions only affect a tiny part of the cache, and therefore don't actually interfere with one another.
+    -- Since the cache is a hash map, it should be possible to have something more STM-aware/friendly here.
+    -- Let's first get some benchmarks though.
+    varCache :: TVar (DMap UUID WeakTVar)
+    -- refCache :: TVar (DMap SHA)
+  }
 
 newtype Transaction t s a = Transaction
   { unTransaction ::
@@ -29,24 +44,15 @@ newtype Transaction t s a = Transaction
 
 data TransactionContext s = TransactionContext
   { txStore :: Store s,
-    txRefRoots :: TVar (DMap SHA),
-    txVarRoots :: TVar (DMap UUID)
+    localVarCache :: TVar (DMap UUID StrongTVar)
+    -- txRefRoots :: TVar (DMap SHA),
   }
+
+newtype StrongTVar a = StrongTVar (TVar (a Void))
+
+newtype WeakTVar a = WeakTVar (Weak (TVar (a Void)))
 
 data TransactionState
-
-data Store s = Store
-  { rootPath :: FilePath,
-    -- TODO
-    -- The entire cache is hidden behind a single TVar.
-    -- That means that every time the cache structurally changes, any other actions are retried.
-    -- This is annoying because the cache is involed in every transactiont.
-    -- Doubly so because conceptually, most transactions only affect a tiny part of the cache, and therefore don't actually interfere with one another.
-    -- Since the cache is a hash map, it should be possible to have something more STM-aware/friendly here.
-    -- Let's first get some benchmarks though.
-    varCache :: TVar (DMap UUID),
-    refCache :: TVar (DMap SHA)
-  }
 
 data LiveVar a s = LiveVar
   { lvTVar :: TVar (a Void),
@@ -67,7 +73,7 @@ newVar a = Transaction $ do
     var <- unsafeIOToSTM nextVar
     tvar <- newTVar a'
     weak <- unsafeIOToSTM (mkWeakTVar tvar (finalizer var tvar vcache'))
-    modifyTVar' vcache' (DMap.insert weak (unVar var))
+    modifyTVar' vcache' (DMap.insert (WeakTVar weak) (unVar var))
     pure $ LiveVar tvar var
 
 toVar :: LiveVar a s -> Var a t
@@ -81,7 +87,7 @@ loadVar var@(Var key) = Transaction $ do
     vcache <- readTVarIO vcache'
     case DMap.lookup key vcache of
       Nothing -> pure Nothing
-      Just weak -> Weak.deRefWeak weak
+      Just (WeakTVar weak) -> Weak.deRefWeak weak
   livevar <- case mref of
     Just ref -> pure $ LiveVar ref (rescopeVar var)
     Nothing -> liftSTM . safeIOToSTM $ do
@@ -90,26 +96,26 @@ loadVar var@(Var key) = Transaction $ do
       weakNew <- mkWeakTVar tvarNew (finalizer var tvarNew vcache')
       atomically $ do
         vcache <- readTVar vcache'
-        let useNewVar = LiveVar tvarNew (rescopeVar var) <$ writeTVar vcache' (DMap.insert weakNew key vcache)
+        let useNewVar = LiveVar tvarNew (rescopeVar var) <$ writeTVar vcache' (DMap.insert (WeakTVar weakNew) key vcache)
         case DMap.lookup key vcache of
           Nothing -> useNewVar
-          Just weakOld ->
+          Just (WeakTVar weakOld) ->
             unsafeIOToSTM (Weak.deRefWeak weakOld) >>= \case
               Nothing -> useNewVar
               Just tvarOld -> pure (LiveVar tvarOld (rescopeVar var))
-  localCache <- asks txVarRoots
+  localCache <- asks localVarCache
   pure livevar
   where
     loadFromDisk :: UUID -> IO (a s)
     loadFromDisk = undefined
 
-finalizer :: Var a s -> TVar (a Void) -> TVar (DMap UUID) -> IO ()
+finalizer :: Var a s -> TVar (a Void) -> TVar (DMap UUID WeakTVar) -> IO ()
 finalizer (Var key) tvar vcache' = do
   atomically $ do
     vcache <- readTVar vcache'
     case DMap.lookup key vcache of
       Nothing -> pure ()
-      Just weak -> do
+      Just (WeakTVar weak) -> do
         tvar' <- unsafeIOToSTM (Weak.deRefWeak weak)
         when (Just tvar == tvar') $ writeTVar vcache' (DMap.delete key vcache)
 
