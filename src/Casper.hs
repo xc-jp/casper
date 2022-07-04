@@ -30,6 +30,7 @@ module Casper
     Var,
     fakeVar,
     readVar,
+    readVarBytes,
     writeVar,
     newVar,
 
@@ -41,6 +42,7 @@ module Casper
     Ref,
     fakeRef,
     readRef,
+    readRefBytes,
     newRef,
 
     -- * CasperT and Store
@@ -574,39 +576,47 @@ newRef a = do
         TransactionCommits v (HashMap.insert sha commits r)
   pure $ Ref (DMap.unsafeMkDKey sha)
 
-readRef :: (Serialize a, Content a) => Ref a -> Transaction a
-readRef ref = do
+readRefBytes :: Ref a -> Transaction ByteString
+readRefBytes ref = do
   TransactionContext _ _ _ casperDir <- Transaction ask
-  let Ref key = ref
-  let sha = DMap.unDKey key
-  liftSTM . safeIOToSTM $ do
-    bs <- ByteString.readFile (casperDir </> "objects" </> show sha)
-    case Serialize.decode bs of
-      Left err ->
-        die $
-          unwords
-            [ "corrupt content for",
-              show sha <> ":",
-              err
-            ]
-      Right !a -> pure a
+  liftSTM . safeIOToSTM $ ByteString.readFile (casperDir </> "objects" </> show ref)
+
+readRef :: Serialize a => Ref a -> Transaction a
+readRef ref = do
+  bs <- readRefBytes ref
+  case Serialize.decode bs of
+    Left err ->
+      liftSTM $
+        safeIOToSTM $
+          die $
+            unwords
+              [ "corrupt content for",
+                show ref <> ":",
+                err
+              ]
+    Right !a -> pure a
+
+readVarBytes :: Var a -> Transaction ByteString
+readVarBytes var = do
+  TransactionContext _ _ _ casperDir <- Transaction ask
+  let uuid = DMap.unDKey $ unVar var
+  liftSTM $ safeIOToSTM $ readVarFromDisk casperDir uuid
 
 readVar :: Serialize a => Var a -> Transaction a
-readVar ref = do
+readVar var = do
   TransactionContext _ _ _ casperDir <- Transaction ask
-  var <- getVar ref $ do
-    let uuid = DMap.unDKey $ unVar ref
-    bs <- readVarFromDisk casperDir uuid
+  tvar <- getVar var $ do
+    bs <- readVarFromDisk casperDir (DMap.unDKey $ unVar var)
     case Serialize.decode bs of
       Left err ->
         die $
           unwords
             [ "corrupt content for",
-              show (toUUID uuid) <> ":",
+              show var <> ":",
               err
             ]
       Right !a -> newTVarIO a
-  liftSTM (readTVar var)
+  liftSTM (readTVar tvar)
 
 readVarFromDisk :: FilePath -> UUID -> IO ByteString
 readVarFromDisk casperDir uuid =
