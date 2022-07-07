@@ -7,6 +7,7 @@
 
 module Casper.Content where
 
+import Data.Functor.Identity (Identity)
 import Data.Int (Int16, Int32, Int64, Int8)
 import Data.IntMap (IntMap)
 import Data.IntSet (IntSet)
@@ -20,6 +21,7 @@ import Data.Ref (Ref)
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Tree (Tree)
+import Data.UUID (UUID)
 import Data.Var (Var)
 import Data.Void (Void)
 import Data.Word (Word16, Word32, Word64, Word8)
@@ -89,6 +91,8 @@ instance Content a => Content (NonEmpty a)
 
 instance Content a => Content (Maybe a)
 
+instance Content a => Content (Identity a)
+
 instance (Ord k, Content k, Content a) => Content (Map.Map k a) where
   refs fv fr = Map.foldMapWithKey (\k a -> refs fv fr k <> refs fv fr a)
 
@@ -99,6 +103,8 @@ instance Content a => Content (IntMap a) where refs = foldRefs
 instance Content a => Content (Tree a) where refs = foldRefs
 
 instance Content a => Content (Seq a) where refs = foldRefs
+
+instance Content UUID where refs = noRefs
 
 instance Content IntSet where refs = noRefs
 
