@@ -32,6 +32,7 @@ module Casper
     readVar,
     writeVar,
     newVar,
+    unsafeVarPath,
 
     -- * Retain variables
     retain,
@@ -42,6 +43,7 @@ module Casper
     fakeRef,
     readRef,
     newRef,
+    unsafeRefPath,
 
     -- * CasperT and Store
     CasperT,
@@ -555,6 +557,14 @@ getVar var createNewTVar = Transaction $ do
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
 
+-- | Get the 'FilePath' of a 'Var' in the store. This is unsafe because the
+-- file at the path can be garbage collected at any point unless the 'Var' is
+-- retained.
+unsafeVarPath :: Monad m => Var a -> CasperT m FilePath
+unsafeVarPath ref = do
+  casperDir <- CasperT $ asks storePath
+  pure $ casperDir </> "objects" </> show ref
+
 getRef :: Ref a -> IO a -> Transaction a
 getRef ref readRef' = Transaction $ do
   TransactionContext _ contentLocks _ (Cache _ ccache _ cusers _ _) _ <- ask
@@ -573,6 +583,14 @@ getRef ref readRef' = Transaction $ do
         atomically $ modifyTVar ccache (DMap.insert a key)
         pure a
       Just cached -> pure cached
+
+-- | Get the FilePath of a 'Ref' in the store. This is unsafe because the
+-- file at the path can be garbage collected at any point unless the 'Ref' is
+-- retained.
+unsafeRefPath :: Monad m => Ref a -> CasperT m FilePath
+unsafeRefPath ref = do
+  casperDir <- CasperT $ asks storePath
+  pure $ casperDir </> "objects" </> show ref
 
 readSha :: Digest SHA256 -> IO SHA
 readSha digest = withByteArray digest $ \ptr -> do
