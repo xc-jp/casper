@@ -30,7 +30,6 @@ module Casper
     Var,
     fakeVar,
     readVar,
-    readVarBytes,
     writeVar,
     newVar,
 
@@ -42,7 +41,6 @@ module Casper
     Ref,
     fakeRef,
     readRef,
-    readRefBytes,
     newRef,
 
     -- * CasperT and Store
@@ -72,7 +70,7 @@ import Control.Applicative (liftA2)
 import Control.Concurrent (ThreadId, forkIO)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (throwIO)
+import Control.Exception (IOException, catch, throwIO)
 import qualified Control.Exception as Exception
 import Control.Monad
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow, bracket)
@@ -132,6 +130,7 @@ data Cache = Cache
     contentCache :: TVar (DMap SHA),
     resourceUsers :: UserTracker UUID, -- determines whether a resource can be freed from memory
     contentUsers :: UserTracker SHA, -- determines whether content can be freed from memory
+    resourceDirty :: UserTracker UUID, -- determines number of in-flight writes to this resource
     gcLock :: TVar Bool
   }
 
@@ -177,6 +176,7 @@ writeBracket (WritePair write move) = Exception.bracket write move
 data TransactionContext = TransactionContext
   { txResourceLocks :: TVar (HashSet UUID), -- FIXME: rename, this is about resources used by this transaction
     txContentLocks :: TVar (HashSet SHA),
+    txResourceDirty :: TVar (HashSet UUID),
     txCache :: Cache,
     txStorePath :: FilePath
   }
@@ -386,8 +386,9 @@ emptyCache = liftIO $ do
   content <- newTVarIO mempty
   resourceUsers' <- UserTracker <$> newTVarIO mempty
   contentUsers' <- UserTracker <$> newTVarIO mempty
+  resourceDirty' <- UserTracker <$> newTVarIO mempty
   lock' <- newTVarIO False
-  pure $ Cache resources content resourceUsers' contentUsers' lock'
+  pure $ Cache resources content resourceUsers' contentUsers' resourceDirty' lock'
 
 -- | Open a Casper 'Store'. This should only be done once per store as
 -- otherwise you can get inconsistent views of the stores.
@@ -450,8 +451,8 @@ transact ::
   (MonadIO m, MonadMask m) =>
   Transaction a ->
   CasperT m a
-transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket enter (exit cache) $ \(rLockSet', cLockSet') -> do
-  let ctx = TransactionContext rLockSet' cLockSet' cache storePath'
+transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket enter (exit cache) $ \(rLockSet', cLockSet', rDirty') -> do
+  let ctx = TransactionContext rLockSet' cLockSet' rDirty' cache storePath'
    in liftIO . atomically $ do
         (a, TransactionCommits ref var) <- runTransaction ctx transaction
         safeIOToSTM $ do
@@ -475,8 +476,12 @@ transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket 
             (HashMap.toList var)
         pure a
   where
-    enter = liftIO $ liftA2 (,) (newTVarIO mempty) (newTVarIO mempty)
-    exit cache (rLockSet', cLockSet') = liftIO $ do
+    enter = liftIO $ do
+      r <- newTVarIO mempty
+      c <- newTVarIO mempty
+      d <- newTVarIO mempty
+      pure (r, c, d)
+    exit cache (rLockSet', cLockSet', rDirty') = liftIO $ do
       rLockSet <- readTVarIO rLockSet'
       forM_ rLockSet $ \rLock -> atomically $ do
         count <- debump rLock (resourceUsers cache)
@@ -485,6 +490,8 @@ transact transaction = CasperT . ReaderT $ \(Store cache storePath') -> bracket 
       forM_ cLockSet $ \cLock -> atomically $ do
         count <- debump cLock (contentUsers cache)
         when (count < 1) $ modifyTVar (contentCache cache) (DMap.delete' cLock)
+      dirtySet <- readTVarIO rDirty'
+      forM_ dirtySet $ \d -> atomically $ debump d (resourceDirty cache)
     runTransaction ::
       TransactionContext ->
       Transaction a ->
@@ -524,7 +531,7 @@ checkUsers k (UserTracker userMap') = do
 
 getVar :: Var a -> IO (TVar a) -> Transaction (TVar a)
 getVar var createNewTVar = Transaction $ do
-  TransactionContext resourceLocks _ (Cache rcache _ rusers _ _) _ <- ask
+  TransactionContext resourceLocks _ _ (Cache rcache _ rusers _ _ _) _ <- ask
   let Var key = var
       uuid = DMap.unDKey key
   lift . lift . safeIOToSTM $ do
@@ -548,6 +555,25 @@ getVar var createNewTVar = Transaction $ do
             Just cachedVar -> pure cachedVar
       Just cachedVar -> pure cachedVar
 
+getRef :: Ref a -> IO a -> Transaction a
+getRef ref readRef' = Transaction $ do
+  TransactionContext _ contentLocks _ (Cache _ ccache _ cusers _ _) _ <- ask
+  let Ref key = ref
+      sha = DMap.unDKey key
+  lift . lift . safeIOToSTM $ do
+    atomically $ do
+      hasLock <- HashSet.member sha <$> readTVar contentLocks
+      unless hasLock $ do
+        modifyTVar contentLocks (HashSet.insert sha)
+        bump sha cusers
+    mCached <- DMap.lookup key <$> readTVarIO ccache
+    case mCached of
+      Nothing -> do
+        a <- readRef'
+        atomically $ modifyTVar ccache (DMap.insert a key)
+        pure a
+      Just cached -> pure cached
+
 readSha :: Digest SHA256 -> IO SHA
 readSha digest = withByteArray digest $ \ptr -> do
   wa <- peek ptr
@@ -561,12 +587,17 @@ readSha digest = withByteArray digest $ \ptr -> do
 -- of the content, so storing the exact same content will yield the exact same 'Ref'.
 newRef :: (Content a, Serialize a) => a -> Transaction (Ref a)
 newRef a = do
-  TransactionContext _ _ _ casperDir <- Transaction ask
+  TransactionContext _ contentLocks _ cache casperDir <- Transaction ask
   let encoded = Serialize.encode a
   let digest = hashWith SHA256 encoded
   (sha, exists) <- liftSTM $
     safeIOToSTM $ do
       s <- readSha digest
+      atomically $ do
+        hasLock <- HashSet.member s <$> readTVar contentLocks
+        unless hasLock $ do
+          modifyTVar contentLocks (HashSet.insert s)
+          bump s (contentUsers cache)
       e <- doesFileExist (casperDir </> "objects" </> show s)
       pure (s, e)
   let commits = commitValue casperDir (show sha) encoded (meta a)
@@ -576,36 +607,65 @@ newRef a = do
         TransactionCommits v (HashMap.insert sha commits r)
   pure $ Ref (DMap.unsafeMkDKey sha)
 
-readRefBytes :: Ref a -> Transaction ByteString
-readRefBytes ref = do
-  TransactionContext _ _ _ casperDir <- Transaction ask
-  liftSTM . safeIOToSTM $ ByteString.readFile (casperDir </> "objects" </> show ref)
+lookupRef :: Serialize a => SHA -> Transaction (Maybe (Either String a))
+lookupRef sha = Transaction $ do
+  TransactionContext _ contentLocks _ (Cache _ _ _ cusers _ _) casperDir <- ask
+  lift . lift . safeIOToSTM $ do
+    atomically $ do
+      hasLock <- HashSet.member sha <$> readTVar contentLocks
+      unless hasLock $ do
+        modifyTVar contentLocks (HashSet.insert sha)
+        bump sha cusers
+    mbs <-
+      (Just <$> ByteString.readFile (casperDir </> "objects" </> show sha))
+        `catch` (\(_ :: IOException) -> pure Nothing)
+    pure $ fmap Serialize.decode mbs
+
+ensureClean :: UUID -> UserTracker UUID -> STM ()
+ensureClean uuid (UserTracker dirty) = do
+  dirtyMap <- readTVar dirty
+  case HashMap.lookup uuid dirtyMap of
+    Nothing -> pure ()
+    Just v -> do
+      count <- readTVar v
+      when (count > 0) retry
+
+lookupVar :: Serialize a => UUID -> Transaction (Maybe (Either String a))
+lookupVar uuid = Transaction $ do
+  TransactionContext resourceLocks _ _ (Cache _ _ rusers _ rdirty _) casperDir <- ask
+  lift . lift . safeIOToSTM $ do
+    atomically $ do
+      ensureClean uuid rdirty
+      hasLock <- HashSet.member uuid <$> readTVar resourceLocks
+      unless hasLock $ do
+        modifyTVar resourceLocks (HashSet.insert uuid)
+        bump uuid rusers
+    mbs <-
+      (Just <$> ByteString.readFile (casperDir </> "objects" </> show uuid))
+        `catch` (\(_ :: IOException) -> pure Nothing)
+    pure $ fmap Serialize.decode mbs
 
 readRef :: Serialize a => Ref a -> Transaction a
 readRef ref = do
-  bs <- readRefBytes ref
-  case Serialize.decode bs of
-    Left err ->
-      liftSTM $
-        safeIOToSTM $
-          die $
-            unwords
-              [ "corrupt content for",
-                show ref <> ":",
-                err
-              ]
-    Right !a -> pure a
-
-readVarBytes :: Var a -> Transaction ByteString
-readVarBytes var = do
-  TransactionContext _ _ _ casperDir <- Transaction ask
-  let uuid = DMap.unDKey $ unVar var
-  liftSTM $ safeIOToSTM $ readVarFromDisk casperDir uuid
+  casperDir <- Transaction (asks txStorePath)
+  getRef ref $ do
+    bs <- ByteString.readFile (casperDir </> "objects" </> show ref)
+    case Serialize.decode bs of
+      Left err ->
+        die $
+          unwords
+            [ "corrupt content for",
+              show ref <> ":",
+              err
+            ]
+      Right !a -> pure a
 
 readVar :: Serialize a => Var a -> Transaction a
 readVar var = do
-  TransactionContext _ _ _ casperDir <- Transaction ask
+  casperDir <- Transaction (asks txStorePath)
+  dirty <- Transaction (asks (resourceDirty . txCache))
   tvar <- getVar var $ do
+    atomically $ ensureClean (DMap.unDKey $ unVar var) dirty
     bs <- readVarFromDisk casperDir (DMap.unDKey $ unVar var)
     case Serialize.decode bs of
       Left err ->
@@ -659,8 +719,16 @@ writeVar :: (Content a, Serialize a) => Var a -> a -> Transaction ()
 writeVar var a = do
   tvar <- getVar var $ newTVarIO a
   liftSTM $ writeTVar tvar a -- This is unfortunately a double write if we create a new TVar
-  TransactionContext _ _ _ casperDir <- Transaction ask
+  casperDir <- Transaction (asks txStorePath)
   let Var key = var
+  let uuid = DMap.unDKey key
+  txDirty <- Transaction (asks txResourceDirty)
+  dirty <- Transaction (asks (resourceDirty . txCache))
+  liftSTM $ do
+    alreadyWritten <- HashSet.member uuid <$> readTVar txDirty
+    unless alreadyWritten $ do
+      modifyTVar txDirty (HashSet.insert uuid)
+      bump uuid dirty
   let commits = commitValue casperDir (varFileName (DMap.unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
@@ -682,12 +750,12 @@ newVar' casperDir a = loop
 
 newVar :: (Content a, Serialize a) => a -> Transaction (Var a)
 newVar a = do
-  TransactionContext _ _ (Cache rcache _ _ _ _) casperDir <- Transaction ask
+  TransactionContext _ _ _ cache casperDir <- Transaction ask
   (uuid, tvar) <- liftSTM $ safeIOToSTM $ newVar' casperDir a
   let var = Var (DMap.unsafeMkDKey uuid)
   let Var key = var
   -- add the variable to the resource cache
-  void . liftSTM $ modifyTVar rcache (DMap.insert tvar key)
+  void . liftSTM $ modifyTVar (resourceCache cache) (DMap.insert tvar key)
   let commits = commitValue casperDir (varFileName (DMap.unDKey key)) (Serialize.encode a) (meta a)
   Transaction $
     modify $ \(TransactionCommits v r) ->
