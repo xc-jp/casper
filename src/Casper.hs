@@ -34,6 +34,7 @@ module Casper
     writeVar,
     newVar,
     unsafeVarPath,
+    lookupVar,
 
     -- * Retain variables
     retain,
@@ -45,6 +46,7 @@ module Casper
     readRef,
     newRef,
     unsafeRefPath,
+    lookupRef,
 
     -- * CasperT and Store
     CasperT,
