@@ -10,6 +10,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
@@ -76,6 +77,7 @@ import Control.Exception (IOException, catch, throwIO)
 import qualified Control.Exception as Exception
 import Control.Monad
 import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow, bracket)
+import Control.Monad.Except (MonadError)
 import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Identity (Identity)
 import Control.Monad.Reader
@@ -209,6 +211,9 @@ deriving instance MonadMask m => MonadMask (CasperT m)
 deriving instance MonadCatch m => MonadCatch (CasperT m)
 
 deriving instance MonadThrow m => MonadThrow (CasperT m)
+
+-- Undecidable because of the coverage condition
+deriving instance MonadError e m => MonadError e (CasperT m)
 
 -- | Remove everything from the casper store that's not accessible from the set
 -- of in-use resources.
