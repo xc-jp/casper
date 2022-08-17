@@ -54,6 +54,7 @@ module Casper
     runCasperT,
     liftSTM,
     collectGarbage,
+    hoistCasper,
 
     -- * Type classes and data types
     Content.Content (..),
@@ -214,6 +215,9 @@ deriving instance MonadThrow m => MonadThrow (CasperT m)
 
 -- Undecidable because of the coverage condition
 deriving instance MonadError e m => MonadError e (CasperT m)
+
+hoistCasper :: (forall r. m r -> n r) -> CasperT m a -> CasperT n a
+hoistCasper f (CasperT (ReaderT x)) = CasperT $ ReaderT $ \r -> f (x r)
 
 -- | Remove everything from the casper store that's not accessible from the set
 -- of in-use resources.
