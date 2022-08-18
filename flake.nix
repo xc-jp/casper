@@ -1,37 +1,36 @@
 {
   description = "casper";
 
-  inputs.haskellNix.url = "github:input-output-hk/haskell.nix";
-  inputs.nixpkgs.follows = "haskellNix/nixpkgs-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.05";
   inputs.flake-utils.url = "github:numtide/flake-utils";
 
-  outputs = { self, nixpkgs, flake-utils, haskellNix }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlay = self: _: {
-          hsPkgs =
-            self.haskell-nix.project' rec {
-              src = ./.;
-              compiler-nix-name = "ghc8107";
-              shell = {
-                tools = {
-                  cabal = { };
-                  ghcid = { };
-                  haskell-language-server = { };
-                  hlint = { };
-                  ormolu = { };
-                };
-              };
-            };
+          hsPkgs = self.haskellPackages.extend (hfinal: hprev: {
+            casper = hfinal.callCabal2nix "casper" ./. { };
+          });
         };
         pkgs = import nixpkgs {
           inherit system;
           overlays = [
-            haskellNix.overlay
             overlay
           ];
         };
       in
-      pkgs.hsPkgs.flake { }
+      {
+        defaultPackage = pkgs.hsPkgs.casper;
+        devShell = pkgs.hsPkgs.shellFor {
+          packages = ps: [ ps.casper ];
+          withHoogle = true;
+          buildInputs = [
+            pkgs.ormolu
+            pkgs.hlint
+            pkgs.haskell-language-server
+            pkgs.cabal-install
+          ];
+        };
+      }
     );
 }
