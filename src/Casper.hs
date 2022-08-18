@@ -34,7 +34,6 @@ module Casper
     writeVar,
     newVar,
     unsafeVarPath,
-    lookupVar,
 
     -- * Retain variables
     retain,
@@ -47,6 +46,7 @@ module Casper
     newRef,
     unsafeRefPath,
     lookupRef,
+    LookupError (..),
 
     -- * CasperT and Store
     CasperT,
@@ -95,7 +95,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64.URL as Base64
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
-import Data.DMap (DMap)
+import Data.DMap (DMap, unsafeMkDKey)
 import qualified Data.DMap as DMap
 import Data.Foldable (traverse_)
 import Data.HashMap.Strict (HashMap)
@@ -636,7 +636,11 @@ newRef a = do
         TransactionCommits v (HashMap.insert sha commits r)
   pure $ Ref (DMap.unsafeMkDKey sha)
 
-lookupRef :: Serialize a => SHA -> Transaction (Maybe (Either String a))
+data LookupError
+  = MissingContent
+  | DataCorruption
+
+lookupRef :: Serialize a => SHA -> Transaction (Either LookupError (Ref a, a))
 lookupRef sha = Transaction $ do
   TransactionContext _ contentLocks _ (Cache _ _ _ cusers _ _) casperDir <- ask
   lift . lift . safeIOToSTM $ do
@@ -645,10 +649,15 @@ lookupRef sha = Transaction $ do
       unless hasLock $ do
         modifyTVar contentLocks (HashSet.insert sha)
         bump sha cusers
+    let ref = Ref $ unsafeMkDKey sha
     mbs <-
-      (Just <$> ByteString.readFile (casperDir </> "objects" </> show sha))
-        `catch` (\(_ :: IOException) -> pure Nothing)
-    pure $ fmap Serialize.decode mbs
+      (Right <$> ByteString.readFile (casperDir </> "objects" </> show sha))
+        `catch` (\(_ :: IOException) -> pure (Left MissingContent))
+    pure $ do
+      bs <- mbs
+      case Serialize.decode bs of
+        Left _ -> Left DataCorruption
+        Right a -> pure (ref, a)
 
 ensureClean :: UUID -> UserTracker UUID -> STM ()
 ensureClean uuid (UserTracker dirty) = do
@@ -658,21 +667,6 @@ ensureClean uuid (UserTracker dirty) = do
     Just v -> do
       count <- readTVar v
       when (count > 0) retry
-
-lookupVar :: Serialize a => UUID -> Transaction (Maybe (Either String a))
-lookupVar uuid = Transaction $ do
-  TransactionContext resourceLocks _ _ (Cache _ _ rusers _ rdirty _) casperDir <- ask
-  lift . lift . safeIOToSTM $ do
-    atomically $ do
-      ensureClean uuid rdirty
-      hasLock <- HashSet.member uuid <$> readTVar resourceLocks
-      unless hasLock $ do
-        modifyTVar resourceLocks (HashSet.insert uuid)
-        bump uuid rusers
-    mbs <-
-      (Just <$> ByteString.readFile (casperDir </> "objects" </> show uuid))
-        `catch` (\(_ :: IOException) -> pure Nothing)
-    pure $ fmap Serialize.decode mbs
 
 readRef :: Serialize a => Ref a -> Transaction a
 readRef ref = do
